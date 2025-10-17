@@ -11,7 +11,6 @@ import logging
 import time
 from transformers import AutoTokenizer, AutoModel
 import torch
-from scipy.special import softmax
 from collections import Counter
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -36,8 +35,8 @@ This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants li
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `scipy`, `numpy`, `tenacity`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch scipy numpy tenacity`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity`
 """)
 
 # Load SciBERT model and tokenizer
@@ -66,13 +65,34 @@ def update_log(message):
         st.session_state.log_buffer.pop(0)
     logging.info(message)
 
-# Define key terms related to piezoelectricity in PVDF
+# Define expanded key terms with variations and synonyms
 KEY_TERMS = [
-    "piezoelectricity", "electrospun nanofibers", "PVDF", "alpha phase", "beta phase", "efficiency",
-    "electricity generation", "mechanical force", "SnO2", "dopants", "doped PVDF", "piezoelectrics",
-    "phase fraction", "beta phase fraction", "alpha phase fraction", "piezoelectric coefficient",
-    "energy harvesting", "nanofiber mats", "doping effects", "polarization", "ferroelectricity",
-    "mechanical stress", "voltage output", "current density", "power density", "crystallinity"
+    "piezoelectricity", "piezoelectric effect", "piezoelectric performance", "piezoelectric properties",
+    "electrospun nanofibers", "electrospun fibers", "piezoelectric nanofibers", "nanofibrous membranes",
+    "PVDF", "polyvinylidene fluoride", "poly(vinylidene fluoride)", "PVdF", "P(VDF-TrFE)",
+    "alpha phase", "α phase", "alpha-phase", "α-phase", "non-polar phase",
+    "beta phase", "β phase", "beta-phase", "β-phase", "polar phase",
+    "efficiency", "piezoelectric efficiency",
+    "electricity generation", "electrical power generation", "power output", "voltage as output",
+    "mechanical force", "mechanical stress", "mechanical deformation", "mechanical energy",
+    "SnO2", "SnO₂", "tin oxide", "tin dioxide", "stannic oxide",
+    "dopants", "doped", "doping",
+    "doped PVDF", "doped polyvinylidene fluoride",
+    "piezoelectrics", "piezoelectric polymer", "piezoelectric materials",
+    "phase fraction", "phase content", "fraction of phase", "crystalline phase",
+    "beta phase fraction", "β phase fraction",
+    "alpha phase fraction", "α phase fraction",
+    "piezoelectric coefficient", "piezoelectric constant", "d33",
+    "energy harvesting", "nanogenerators", "scavenging mechanical energy",
+    "nanofiber mats", "nanofibrous mats",
+    "doping effects", "dopant effects",
+    "polarization", "ferroelectric polarization", "pyroelectric",
+    "ferroelectricity", "ferroelectric properties",
+    "mechanical stress",
+    "voltage output",
+    "current density",
+    "power density",
+    "crystallinity", "semicrystalline"
 ]
 
 # SciBERT scoring with attention mechanism
@@ -82,13 +102,10 @@ def score_abstract_with_scibert(abstract):
         inputs = scibert_tokenizer(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True, return_attention_mask=True)
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
-        # No logits since using AutoModel; compute base relevance from fallback
         abstract_lower = abstract.lower()
-        word_counts = Counter(re.findall(r'\b\w+\b', abstract_lower))
-        total_words = sum(word_counts.values())
-        score = sum(word_counts.get(kw.lower(), 0) for kw in KEY_TERMS) / (total_words + 1e-6)
-        max_possible_score = len(KEY_TERMS) / 10
-        relevance_prob = min(score / max_possible_score, 1.0) if max_possible_score > 0 else 0.0
+        # Scoring based on presence (OR logic), made lenient with sqrt
+        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
+        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_TERMS))
         
         # Use attention to boost if keywords present
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
@@ -97,18 +114,15 @@ def score_abstract_with_scibert(abstract):
             attentions = outputs.attentions[-1][0, 0].numpy()  # Last layer, first head
             attn_score = np.sum(attentions[keyword_indices, :]) / len(keyword_indices)
             if attn_score > 0.1:
-                relevance_prob = min(relevance_prob + 0.2 * len(keyword_indices) / len(tokens), 1.0)
-        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (keywords matched: {len(keyword_indices)})")
+                relevance_prob = min(relevance_prob + 0.2 * (len(keyword_indices) / len(tokens)), 1.0)
+        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (keywords matched: {num_matched})")
         return relevance_prob
     except Exception as e:
         update_log(f"SciBERT scoring failed: {str(e)}")
-        # Fallback scoring
+        # Pure fallback, lenient with sqrt
         abstract_lower = abstract.lower()
-        word_counts = Counter(re.findall(r'\b\w+\b', abstract_lower))
-        total_words = sum(word_counts.values())
-        score = sum(word_counts.get(kw.lower(), 0) for kw in KEY_TERMS) / (total_words + 1e-6)
-        max_possible_score = len(KEY_TERMS) / 10
-        relevance_prob = min(score / max_possible_score, 1.0) if max_possible_score > 0 else 0.0
+        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
+        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_TERMS))
         update_log(f"Fallback scoring: {relevance_prob:.3f}")
         return relevance_prob
 
@@ -221,9 +235,7 @@ def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
 @st.cache_data
 def query_arxiv(query, categories, max_results, start_year, end_year):
     try:
-        query_terms = query.strip().split()
-        formatted_terms = [term.strip('"').replace(" ", "+") for term in query_terms]
-        api_query = " ".join(formatted_terms)
+        api_query = query  # Use the original query with phrases and OR
         
         client = arxiv.Client()
         search = arxiv.Search(
@@ -233,18 +245,19 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
             sort_order=arxiv.SortOrder.Descending
         )
         papers = []
+        query_terms = [t.strip() for t in query.split(' OR ')]
+        query_words = {t.strip('"').lower() for t in query_terms}
         for result in client.results(search):
             if any(cat in result.categories for cat in categories) and start_year <= result.published.year <= end_year:
-                abstract = result.summary.lower()
-                title = result.title.lower()
-                query_words = set(word.lower().strip('"') for word in query_terms)
-                matched_terms = [word for word in query_words if word in abstract or word in title]
+                abstract_lower = result.summary.lower()
+                title_lower = result.title.lower()
+                matched_terms = [term for term in query_words if term in abstract_lower or term in title_lower]
                 if not matched_terms:
                     continue
                 relevance_prob = score_abstract_with_scibert(result.summary)
-                abstract_highlighted = abstract
+                abstract_highlighted = result.summary
                 for term in matched_terms:
-                    abstract_highlighted = re.sub(r'\b{}\b'.format(re.escape(term)), f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
+                    abstract_highlighted = re.sub(r'\b' + re.escape(term) + r'\b', f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
                 
                 papers.append({
                     "id": result.entry_id.split('/')[-1],
