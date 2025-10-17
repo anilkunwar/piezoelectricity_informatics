@@ -11,7 +11,6 @@ import logging
 import time
 from transformers import AutoTokenizer, AutoModel
 import torch
-from scipy.special import softmax
 from collections import Counter
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -82,13 +81,10 @@ def score_abstract_with_scibert(abstract):
         inputs = scibert_tokenizer(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True, return_attention_mask=True)
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
-        # No logits since using AutoModel; compute base relevance from fallback
         abstract_lower = abstract.lower()
-        word_counts = Counter(re.findall(r'\b\w+\b', abstract_lower))
-        total_words = sum(word_counts.values())
-        score = sum(word_counts.get(kw.lower(), 0) for kw in KEY_TERMS) / (total_words + 1e-6)
-        max_possible_score = len(KEY_TERMS) / 10
-        relevance_prob = min(score / max_possible_score, 1.0) if max_possible_score > 0 else 0.0
+        # Fallback scoring based on presence (OR logic)
+        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
+        relevance_prob = num_matched / len(KEY_TERMS)
         
         # Use attention to boost if keywords present
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
@@ -97,18 +93,15 @@ def score_abstract_with_scibert(abstract):
             attentions = outputs.attentions[-1][0, 0].numpy()  # Last layer, first head
             attn_score = np.sum(attentions[keyword_indices, :]) / len(keyword_indices)
             if attn_score > 0.1:
-                relevance_prob = min(relevance_prob + 0.2 * len(keyword_indices) / len(tokens), 1.0)
-        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (keywords matched: {len(keyword_indices)})")
+                relevance_prob = min(relevance_prob + 0.2 * (len(keyword_indices) / len(tokens)), 1.0)
+        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (keywords matched: {num_matched})")
         return relevance_prob
     except Exception as e:
         update_log(f"SciBERT scoring failed: {str(e)}")
-        # Fallback scoring
+        # Pure fallback
         abstract_lower = abstract.lower()
-        word_counts = Counter(re.findall(r'\b\w+\b', abstract_lower))
-        total_words = sum(word_counts.values())
-        score = sum(word_counts.get(kw.lower(), 0) for kw in KEY_TERMS) / (total_words + 1e-6)
-        max_possible_score = len(KEY_TERMS) / 10
-        relevance_prob = min(score / max_possible_score, 1.0) if max_possible_score > 0 else 0.0
+        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
+        relevance_prob = num_matched / len(KEY_TERMS)
         update_log(f"Fallback scoring: {relevance_prob:.3f}")
         return relevance_prob
 
@@ -221,9 +214,7 @@ def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
 @st.cache_data
 def query_arxiv(query, categories, max_results, start_year, end_year):
     try:
-        query_terms = query.strip().split()
-        formatted_terms = [term.strip('"').replace(" ", "+") for term in query_terms]
-        api_query = " ".join(formatted_terms)
+        api_query = query  # Use the original query with phrases and OR
         
         client = arxiv.Client()
         search = arxiv.Search(
@@ -233,16 +224,17 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
             sort_order=arxiv.SortOrder.Descending
         )
         papers = []
+        query_terms = [t.strip() for t in query.split(' OR ')]
+        query_words = {t.strip('"').lower() for t in query_terms}
         for result in client.results(search):
             if any(cat in result.categories for cat in categories) and start_year <= result.published.year <= end_year:
                 abstract = result.summary.lower()
                 title = result.title.lower()
-                query_words = set(word.lower().strip('"') for word in query_terms)
-                matched_terms = [word for word in query_words if word in abstract or word in title]
+                matched_terms = [term for term in query_words if term in abstract or term in title]
                 if not matched_terms:
                     continue
                 relevance_prob = score_abstract_with_scibert(result.summary)
-                abstract_highlighted = abstract
+                abstract_highlighted = result.summary.lower()
                 for term in matched_terms:
                     abstract_highlighted = re.sub(r'\b{}\b'.format(re.escape(term)), f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
                 
