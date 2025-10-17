@@ -35,8 +35,8 @@ This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants li
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `scipy`, `numpy`, `tenacity`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch scipy numpy tenacity`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity`
 """)
 
 # Load SciBERT model and tokenizer
@@ -82,9 +82,9 @@ def score_abstract_with_scibert(abstract):
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
         abstract_lower = abstract.lower()
-        # Fallback scoring based on presence (OR logic)
+        # Fallback scoring based on presence (OR logic), made more lenient with sqrt
         num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
-        relevance_prob = num_matched / len(KEY_TERMS)
+        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_TERMS))
         
         # Use attention to boost if keywords present
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
@@ -98,10 +98,10 @@ def score_abstract_with_scibert(abstract):
         return relevance_prob
     except Exception as e:
         update_log(f"SciBERT scoring failed: {str(e)}")
-        # Pure fallback
+        # Pure fallback, lenient with sqrt
         abstract_lower = abstract.lower()
         num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
-        relevance_prob = num_matched / len(KEY_TERMS)
+        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_TERMS))
         update_log(f"Fallback scoring: {relevance_prob:.3f}")
         return relevance_prob
 
