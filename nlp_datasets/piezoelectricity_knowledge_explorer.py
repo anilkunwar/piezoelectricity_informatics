@@ -9,8 +9,9 @@ import sqlite3
 from datetime import datetime
 import logging
 import time
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+from scipy.special import softmax
 from collections import Counter
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -18,31 +19,31 @@ import zipfile
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
-METADATA_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_metadata.db")
-UNIVERSE_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_universe.db")
+METADATA_DB_FILE = os.path.join(DB_DIR, "coreshellnanoparticles_metadata.db")
+UNIVERSE_DB_FILE = os.path.join(DB_DIR, "coreshellnanoparticles_universe.db")
 
 # Initialize logging
-logging.basicConfig(filename=os.path.join(DB_DIR, 'piezoelectricity_query.log'), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename=os.path.join(DB_DIR, 'coreshellnanoparticles_query.log'), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Streamlit app
-st.set_page_config(page_title="Piezoelectricity in PVDF Query Tool", layout="wide")
-st.title("Piezoelectricity in PVDF Query Tool with SciBERT")
+st.set_page_config(page_title="Core-Shell Nanoparticles Query Tool", layout="wide")
+st.title("Core-Shell Nanoparticles Query Tool with SciBERT")
 st.markdown("""
-This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants like SnO2**, focusing on **alpha and beta phase fractions**, **electrospun nanofibers**, **efficiency**, **electricity generation**, **mechanical force**, and related factors for piezoelectric studies. It uses SciBERT with attention mechanism to prioritize relevant abstracts (>30% relevance) and stores metadata in `piezoelectricity_metadata.db` and full PDF text in `piezoelectricity_universe.db` for fallback searches.
+This tool queries arXiv for papers on **Ag Cu core-shell nanoparticles prepared by electroless deposition**, focusing on aspects such as **thermal stability**, **electric resistivity**, **Ag shell**, **Cu core**, **flexible electronics**, **nanotechnology**, and **applications**. It uses SciBERT to prioritize relevant abstracts (>30% relevance) and stores metadata in `coreshellnanoparticles_metadata.db` and full PDF text in `coreshellnanoparticles_universe.db` for fallback searches. PDFs are stored individually and can be downloaded as a ZIP file.
 """)
 
 # Dependency check
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `scipy`, `numpy`, `tenacity`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch scipy numpy tenacity`
 """)
 
 # Load SciBERT model and tokenizer
 try:
     scibert_tokenizer = AutoTokenizer.from_pretrained("allenai/scibert_scivocab_uncased")
-    scibert_model = AutoModel.from_pretrained("allenai/scibert_scivocab_uncased")
+    scibert_model = AutoModelForSequenceClassification.from_pretrained("allenai/scibert_scivocab_uncased")
     scibert_model.eval()
 except Exception as e:
     st.error(f"Failed to load SciBERT: {e}. Install: `pip install transformers torch`")
@@ -65,34 +66,12 @@ def update_log(message):
         st.session_state.log_buffer.pop(0)
     logging.info(message)
 
-# Define expanded key terms with variations and synonyms
+# Define key terms related to core-shell nanoparticles
 KEY_TERMS = [
-    "piezoelectricity", "piezoelectric effect", "piezoelectric performance", "piezoelectric properties",
-    "electrospun nanofibers", "electrospun fibers", "piezoelectric nanofibers", "nanofibrous membranes",
-    "PVDF", "polyvinylidene fluoride", "poly(vinylidene fluoride)", "PVdF", "P(VDF-TrFE)",
-    "alpha phase", "α phase", "alpha-phase", "α-phase", "non-polar phase",
-    "beta phase", "β phase", "beta-phase", "β-phase", "polar phase",
-    "efficiency", "piezoelectric efficiency",
-    "electricity generation", "electrical power generation", "power output", "voltage as output",
-    "mechanical force", "mechanical stress", "mechanical deformation", "mechanical energy",
-    "SnO2", "SnO₂", "tin oxide", "tin dioxide", "stannic oxide",
-    "dopants", "doped", "doping",
-    "doped PVDF", "doped polyvinylidene fluoride",
-    "piezoelectrics", "piezoelectric polymer", "piezoelectric materials",
-    "phase fraction", "phase content", "fraction of phase", "crystalline phase",
-    "beta phase fraction", "β phase fraction",
-    "alpha phase fraction", "α phase fraction",
-    "piezoelectric coefficient", "piezoelectric constant", "d33",
-    "energy harvesting", "nanogenerators", "scavenging mechanical energy",
-    "nanofiber mats", "nanofibrous mats",
-    "doping effects", "dopant effects",
-    "polarization", "ferroelectric polarization", "pyroelectric",
-    "ferroelectricity", "ferroelectric properties",
-    "mechanical stress",
-    "voltage output",
-    "current density",
-    "power density",
-    "crystallinity", "semicrystalline"
+    "core-shell nanoparticles", "electroless deposition", "thermal stability", "electric resistivity",
+    "Ag shell", "Cu core", "flexible electronics", "nanotechnology", "applications",
+    "silver shell", "copper core", "core-shell", "nanoparticles", "deposition", "electroless",
+    "stability", "resistivity", "electronics", "nano"
 ]
 
 # SciBERT scoring with attention mechanism
@@ -102,27 +81,27 @@ def score_abstract_with_scibert(abstract):
         inputs = scibert_tokenizer(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True, return_attention_mask=True)
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
-        abstract_lower = abstract.lower()
-        # Scoring based on presence (OR logic), made lenient with sqrt
-        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
-        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_TERMS))
-        
-        # Use attention to boost if keywords present
+        logits = outputs.logits.numpy()
+        probs = softmax(logits, axis=1)
+        relevance_prob = probs[0][1]
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
         keyword_indices = [i for i, token in enumerate(tokens) if any(kw.lower() in token.lower() for kw in KEY_TERMS)]
         if keyword_indices:
-            attentions = outputs.attentions[-1][0, 0].numpy()  # Last layer, first head
+            attentions = outputs.attentions[-1][0, 0].numpy()
             attn_score = np.sum(attentions[keyword_indices, :]) / len(keyword_indices)
-            if attn_score > 0.1:
-                relevance_prob = min(relevance_prob + 0.2 * (len(keyword_indices) / len(tokens)), 1.0)
-        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (keywords matched: {num_matched})")
+            if attn_score > 0.1 and relevance_prob < 0.5:
+                relevance_prob = min(relevance_prob + 0.2 * len(keyword_indices), 1.0)
+        update_log(f"SciBERT scored abstract: {relevance_prob:.3f} (keywords matched: {len(keyword_indices)})")
         return relevance_prob
     except Exception as e:
         update_log(f"SciBERT scoring failed: {str(e)}")
-        # Pure fallback, lenient with sqrt
+        # Fallback scoring
         abstract_lower = abstract.lower()
-        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
-        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_TERMS))
+        word_counts = Counter(re.findall(r'\b\w+\b', abstract_lower))
+        total_words = sum(word_counts.values())
+        score = sum(word_counts.get(kw.lower(), 0) for kw in KEY_TERMS) / (total_words + 1e-6)
+        max_possible_score = len(KEY_TERMS) / 10
+        relevance_prob = min(score / max_possible_score, 1.0) if max_possible_score > 0 else 0.0
         update_log(f"Fallback scoring: {relevance_prob:.3f}")
         return relevance_prob
 
@@ -182,7 +161,7 @@ def initialize_db(db_file):
         update_log(f"Failed to initialize {db_file}: {str(e)}")
         st.error(f"Failed to initialize {db_file}: {str(e)}")
 
-# Create piezoelectricity_universe.db incrementally
+# Create coreshellnanoparticles_universe.db incrementally
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
     try:
@@ -235,7 +214,9 @@ def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
 @st.cache_data
 def query_arxiv(query, categories, max_results, start_year, end_year):
     try:
-        api_query = query  # Use the original query with phrases and OR
+        query_terms = query.strip().split()
+        formatted_terms = [term.strip('"').replace(" ", "+") for term in query_terms]
+        api_query = " ".join(formatted_terms)
         
         client = arxiv.Client()
         search = arxiv.Search(
@@ -245,19 +226,18 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
             sort_order=arxiv.SortOrder.Descending
         )
         papers = []
-        query_terms = [t.strip() for t in query.split(' OR ')]
-        query_words = {t.strip('"').lower() for t in query_terms}
         for result in client.results(search):
             if any(cat in result.categories for cat in categories) and start_year <= result.published.year <= end_year:
-                abstract_lower = result.summary.lower()
-                title_lower = result.title.lower()
-                matched_terms = [term for term in query_words if term in abstract_lower or term in title_lower]
+                abstract = result.summary.lower()
+                title = result.title.lower()
+                query_words = set(word.lower().strip('"') for word in query_terms)
+                matched_terms = [word for word in query_words if word in abstract or word in title]
                 if not matched_terms:
                     continue
                 relevance_prob = score_abstract_with_scibert(result.summary)
-                abstract_highlighted = result.summary
+                abstract_highlighted = abstract
                 for term in matched_terms:
-                    abstract_highlighted = re.sub(r'\b' + re.escape(term) + r'\b', f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
+                    abstract_highlighted = re.sub(r'\b{}\b'.format(re.escape(term)), f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
                 
                 papers.append({
                     "id": result.entry_id.split('/')[-1],
@@ -310,23 +290,18 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
         update_log(f"PDF download failed for {paper_id}: {str(e)}")
         return f"Failed: {str(e)}", None, f"Error: {str(e)}"
 
-# Create ZIP of PDFs
+# Create ZIP file of PDFs
 def create_pdf_zip(pdf_paths):
-    zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
-    try:
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for pdf in pdf_paths:
-                if pdf and os.path.exists(pdf):
-                    zipf.write(pdf, os.path.basename(pdf))
-        update_log(f"Created ZIP file: {zip_path}")
-        return zip_path
-    except Exception as e:
-        update_log(f"ZIP creation failed: {str(e)}")
-        return None
+    zip_path = os.path.join(DB_DIR, "coreshellnanoparticles_pdfs.zip")
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for pdf_path in pdf_paths:
+            if pdf_path and os.path.exists(pdf_path):
+                zipf.write(pdf_path, os.path.basename(pdf_path))
+    return zip_path
 
 # Main Streamlit app
-st.header("arXiv Query for Piezoelectricity in Doped PVDF")
-st.markdown("Search for abstracts on **piezoelectricity**, **electrospun nanofibers**, **PVDF**, **alpha/beta phases**, **SnO2 dopants**, **efficiency**, **electricity generation**, **mechanical force** using SciBERT with attention mechanism.")
+st.header("arXiv Query for Ag Cu Core-Shell Nanoparticles")
+st.markdown("Search for abstracts on **Ag Cu core-shell nanoparticles** prepared by **electroless deposition**, including **thermal stability**, **electric resistivity**, **Ag shell**, **Cu core**, **flexible electronics**, **nanotechnology**, and **applications** using SciBERT.")
 
 log_container = st.empty()
 def display_logs():
@@ -364,40 +339,29 @@ if search_button:
             st.success(f"Found **{len(papers)}** papers. Filtering for relevance > 30%...")
             relevant_papers = [p for p in papers if p["relevance_prob"] > 30.0]
             if not relevant_papers:
-                st.warning("No papers with relevance > 30%. Broaden query or check 'piezoelectricity_query.log'.")
+                st.warning("No papers with relevance > 30%. Broaden query or check 'coreshellnanoparticles_query.log'.")
             else:
                 st.success(f"**{len(relevant_papers)}** papers with relevance > 30%. Downloading PDFs...")
                 progress_bar = st.progress(0)
+                pdf_paths = []
                 for i, paper in enumerate(relevant_papers):
                     if paper["pdf_url"]:
                         status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
                         paper["download_status"] = status
                         paper["pdf_path"] = pdf_path
                         paper["content"] = content
+                        if pdf_path:
+                            pdf_paths.append(pdf_path)
                     progress_bar.progress((i + 1) / len(relevant_papers))
                     time.sleep(1)  # Avoid rate-limiting
                     update_log(f"Processed paper {i+1}/{len(relevant_papers)}: {paper['title']}")
                 
                 df = pd.DataFrame(relevant_papers)
                 st.subheader("Papers (Relevance > 30%)")
-                # Display dataframe with PDF links (arXiv cloud links)
-                df_display = df[["id", "title", "year", "categories", "abstract_highlighted", "matched_terms", "relevance_prob", "download_status"]].copy()
-                df_display["PDF Link"] = [f"[View PDF]({url})" for url in df["pdf_url"]]
                 st.dataframe(
-                    df_display,
+                    df[["id", "title", "year", "categories", "abstract_highlighted", "matched_terms", "relevance_prob", "download_status"]],
                     use_container_width=True
                 )
-                
-                # Create ZIP for download
-                zip_path = create_pdf_zip([p['pdf_path'] for p in relevant_papers])
-                if zip_path:
-                    with open(zip_path, 'rb') as f:
-                        st.download_button(
-                            label="Download PDFs as ZIP",
-                            data=f,
-                            file_name="piezoelectricity_pdfs.zip",
-                            mime="application/zip"
-                        )
                 
                 if "SQLite (.db)" in output_formats:
                     sqlite_status = save_to_sqlite(df.drop(columns=["abstract_highlighted"]), [])
@@ -408,7 +372,7 @@ if search_button:
                     st.download_button(
                         label="Download Paper Metadata CSV",
                         data=csv,
-                        file_name="piezoelectricity_papers.csv",
+                        file_name="coreshellnanoparticles_papers.csv",
                         mime="text/csv"
                     )
                 
@@ -417,8 +381,30 @@ if search_button:
                     st.download_button(
                         label="Download Paper Metadata JSON",
                         data=json_data,
-                        file_name="piezoelectricity_papers.json",
+                        file_name="coreshellnanoparticles_papers.json",
                         mime="application/json"
                     )
+                
+                # Display individual PDF links
+                if pdf_paths:
+                    st.subheader("Individual PDF Downloads")
+                    for pdf_path in pdf_paths:
+                        with open(pdf_path, "rb") as f:
+                            st.download_button(
+                                label=f"Download {os.path.basename(pdf_path)}",
+                                data=f,
+                                file_name=os.path.basename(pdf_path),
+                                mime="application/pdf"
+                            )
+                    
+                    # ZIP download
+                    zip_path = create_pdf_zip(pdf_paths)
+                    with open(zip_path, "rb") as f:
+                        st.download_button(
+                            label="Download All PDFs as ZIP",
+                            data=f,
+                            file_name="coreshellnanoparticles_pdfs.zip",
+                            mime="application/zip"
+                        )
                 
                 display_logs()
