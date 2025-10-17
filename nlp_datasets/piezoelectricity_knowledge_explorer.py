@@ -11,10 +11,10 @@ import logging
 import time
 from transformers import AutoTokenizer, AutoModel
 import torch
-from collections import Counter
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
 import zipfile
+import concurrent.futures
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,15 +35,20 @@ This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants li
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `scipy`, `numpy`, `tenacity`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch scipy numpy tenacity`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity`
 """)
 
-# Load SciBERT model and tokenizer
+# Cache the SciBERT model and tokenizer
+@st.cache_resource
+def load_scibert():
+    tokenizer = AutoTokenizer.from_pretrained("allenai/scibert_scivocab_uncased")
+    model = AutoModel.from_pretrained("allenai/scibert_scivocab_uncased")
+    model.eval()
+    return tokenizer, model
+
 try:
-    scibert_tokenizer = AutoTokenizer.from_pretrained("allenai/scibert_scivocab_uncased")
-    scibert_model = AutoModel.from_pretrained("allenai/scibert_scivocab_uncased")
-    scibert_model.eval()
+    scibert_tokenizer, scibert_model = load_scibert()
 except Exception as e:
     st.error(f"Failed to load SciBERT: {e}. Install: `pip install transformers torch`")
     st.stop()
@@ -65,14 +70,96 @@ def update_log(message):
         st.session_state.log_buffer.pop(0)
     logging.info(message)
 
-# Define key terms related to piezoelectricity in PVDF
+# Define normalization function with caching
+@st.cache_data
+def normalize_text(text):
+    # Replace Greek letters with Latin equivalents
+    greek_to_latin = {
+        'α': 'alpha', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'ε': 'epsilon',
+        'Α': 'alpha', 'Β': 'beta', 'Γ': 'gamma', 'Δ': 'delta', 'Ε': 'epsilon'
+    }
+    for g, l in greek_to_latin.items():
+        text = text.replace(g, l)
+    # Replace subscripts with digits
+    subscripts = {
+        '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
+        '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9'
+    }
+    for s, d in subscripts.items():
+        text = text.replace(s, d)
+    # Replace superscripts if needed (e.g., for charges)
+    superscripts = {
+        '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+        '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'
+    }
+    for s, d in superscripts.items():
+        text = text.replace(s, d)
+    return text.lower()
+
+# Define key terms for query
 KEY_TERMS = [
-    "piezoelectricity", "electrospun nanofibers", "PVDF", "alpha phase", "beta phase", "efficiency",
-    "electricity generation", "mechanical force", "SnO2", "dopants", "doped PVDF", "piezoelectrics",
-    "phase fraction", "beta phase fraction", "alpha phase fraction", "piezoelectric coefficient",
-    "energy harvesting", "nanofiber mats", "doping effects", "polarization", "ferroelectricity",
-    "mechanical stress", "voltage output", "current density", "power density", "crystallinity"
+    "piezoelectricity", "piezoelectric effect", "piezoelectric performance", "piezoelectric properties",
+    "electrospun nanofibers", "electrospun fibers", "piezoelectric nanofibers", "nanofibrous membranes",
+    "PVDF", "polyvinylidene fluoride", "poly(vinylidene fluoride)", "PVdF", "P(VDF-TrFE)",
+    "alpha phase", "beta phase", "gamma phase", "delta phase",
+    "efficiency", "piezoelectric efficiency",
+    "electricity generation", "electrical power generation", "power output", "voltage output",
+    "mechanical force", "mechanical stress", "mechanical deformation", "mechanical energy",
+    "SnO2", "tin oxide", "tin dioxide", "stannic oxide",
+    "dopants", "doped", "doping",
+    "doped PVDF", "doped polyvinylidene fluoride",
+    "piezoelectrics", "piezoelectric polymer", "piezoelectric materials",
+    "phase fraction", "phase content", "fraction of phase", "crystalline phase",
+    "energy harvesting", "nanogenerators", "scavenging mechanical energy",
+    "nanofiber mats", "nanofibrous mats",
+    "doping effects", "dopant effects",
+    "polarization", "ferroelectric polarization", "pyroelectric",
+    "ferroelectricity", "ferroelectric properties",
+    "current density",
+    "power density",
+    "crystallinity", "semicrystalline"
 ]
+
+# Define key patterns as regex for optimized matching
+KEY_PATTERNS = [
+    r'\bpiezoelectric(?:ity| effect| performance| properties| coefficient| constant| polymer| materials)?\b',
+    r'\belectrospun (?:nano)?fibers?|nanofiber mats|nanofibrous membranes?\b',
+    r'\bpvdf|polyvinylidene fluoride|poly\s*\(?\s*vinylidene fluoride\s*\)?|pvd?f\b',
+    r'\b(alpha|beta|gamma|delta|epsilon)\s*(?:phase|polymorph|crystal|crystals?|crystalline phase)\b',
+    r'\befficiency|piezoelectric efficiency\b',
+    r'\belectricity generation|electrical power generation|power output|voltage output\b',
+    r'\bmechanical (?:force|stress|deformation|energy)\b',
+    r'\bsno2|tin oxide|tin dioxide|stannic oxide\b',
+    r'\bdopants?|doped|doping effects?\b',
+    r'\bdoped pvdf\b',
+    r'\bpiezoelectrics\b',
+    r'\b(?:beta|alpha|gamma|delta|epsilon|phase) fraction|phase content|fraction of phase\b',
+    r'\benergy harvesting|nanogenerators?|scavenging mechanical energy\b',
+    r'\bpolarization|ferroelectric polarization|pyroelectric\b',
+    r'\bferroelectric(?:ity| properties)?\b',
+    r'\bcurrent density\b',
+    r'\bpower density\b',
+    r'\bcrystallinity|semicrystalline\b',
+    r'\bpyroelectric properties?|pyroelectric coefficient\b',
+    r'\bdielectric properties?|dielectric constant|permittivity\b',
+    r'\bd33|d31|g33\b',  # Piezoelectric coefficients
+    r'\bpvdf-trfe|pvdf-hfp|pvdf-ctfe|p\(vdf-co-hfp\)|p\(vdf-co-trfe\)\b',  # Copolymers
+    r'\bbatio3|barium titanate\b',
+    r'\bzno|zinc oxide\b',
+    r'\btio2|titanium dioxide\b',
+    r'\bcnt|carbon nanotubes?\b',
+    r'\bgraphene(?: oxide)?\b',
+    r'\bcofe2o4|fe3o4|magnetic nanoparticles?\b',
+    r'\bnanocomposites?|composites?\b',
+    r'\bpoling|annealing|stretching\b'  # Processing methods
+]
+
+# Compile patterns with caching
+@st.cache_data
+def compile_patterns():
+    return [re.compile(pat, re.IGNORECASE) for pat in KEY_PATTERNS]
+
+COMPILED_PATTERNS = compile_patterns()
 
 # SciBERT scoring with attention mechanism
 @st.cache_data
@@ -81,31 +168,32 @@ def score_abstract_with_scibert(abstract):
         inputs = scibert_tokenizer(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True, return_attention_mask=True)
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
-        abstract_lower = abstract.lower()
-        # Fallback scoring based on presence (OR logic)
-        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
-        relevance_prob = num_matched / len(KEY_TERMS)
+        abstract_normalized = normalize_text(abstract)
+        # Scoring based on regex pattern matches (OR logic), lenient with sqrt
+        num_matched = sum(1 for pat in COMPILED_PATTERNS if pat.search(abstract_normalized))
+        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_PATTERNS))
         
         # Use attention to boost if keywords present
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-        keyword_indices = [i for i, token in enumerate(tokens) if any(kw.lower() in token.lower() for kw in KEY_TERMS)]
+        keyword_indices = [i for i, token in enumerate(tokens) if any(kw in token.lower() for kw in ['pvdf', 'piezo', 'phase', 'beta', 'alpha'])]  # Simplified keyword check for attention
         if keyword_indices:
             attentions = outputs.attentions[-1][0, 0].numpy()  # Last layer, first head
             attn_score = np.sum(attentions[keyword_indices, :]) / len(keyword_indices)
             if attn_score > 0.1:
                 relevance_prob = min(relevance_prob + 0.2 * (len(keyword_indices) / len(tokens)), 1.0)
-        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (keywords matched: {num_matched})")
+        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (patterns matched: {num_matched})")
         return relevance_prob
     except Exception as e:
         update_log(f"SciBERT scoring failed: {str(e)}")
-        # Pure fallback
-        abstract_lower = abstract.lower()
-        num_matched = sum(1 for kw in KEY_TERMS if kw.lower() in abstract_lower)
-        relevance_prob = num_matched / len(KEY_TERMS)
+        # Pure fallback, lenient with sqrt
+        abstract_normalized = normalize_text(abstract)
+        num_matched = sum(1 for pat in COMPILED_PATTERNS if pat.search(abstract_normalized))
+        relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_PATTERNS))
         update_log(f"Fallback scoring: {relevance_prob:.3f}")
         return relevance_prob
 
-# Extract text from PDF
+# Extract text from PDF with caching
+@st.cache_data
 def extract_text_from_pdf(pdf_path):
     try:
         doc = fitz.open(pdf_path)
@@ -119,9 +207,14 @@ def extract_text_from_pdf(pdf_path):
         return f"Error: {str(e)}"
 
 # Initialize database
+@st.cache_resource
+def get_db_connection(db_file):
+    conn = sqlite3.connect(db_file)
+    return conn
+
 def initialize_db(db_file):
     try:
-        conn = sqlite3.connect(db_file)
+        conn = get_db_connection(db_file)
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS papers (
@@ -155,7 +248,6 @@ def initialize_db(db_file):
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paper_id ON parameters(paper_id)")
         conn.commit()
-        conn.close()
         update_log(f"Initialized database schema for {db_file}")
     except Exception as e:
         update_log(f"Failed to initialize {db_file}: {str(e)}")
@@ -165,7 +257,7 @@ def initialize_db(db_file):
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
     try:
-        conn = sqlite3.connect(db_file)
+        conn = get_db_connection(db_file)
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS papers (
@@ -187,7 +279,6 @@ def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
             paper.get("content", "No text extracted")
         ))
         conn.commit()
-        conn.close()
         update_log(f"Updated {db_file} with paper {paper['id']}")
         return db_file
     except Exception as e:
@@ -198,12 +289,11 @@ def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
 def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
     try:
         initialize_db(metadata_db_file)
-        conn = sqlite3.connect(metadata_db_file)
+        conn = get_db_connection(metadata_db_file)
         papers_df.to_sql("papers", conn, if_exists="replace", index=False)
         params_df = pd.DataFrame(params_list)
         if not params_df.empty:
             params_df.to_sql("parameters", conn, if_exists="append", index=False)
-        conn.close()
         update_log(f"Saved {len(papers_df)} papers and {len(params_list)} parameters to {metadata_db_file}")
         return f"Saved to {metadata_db_file}"
     except Exception as e:
@@ -228,15 +318,15 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
         query_words = {t.strip('"').lower() for t in query_terms}
         for result in client.results(search):
             if any(cat in result.categories for cat in categories) and start_year <= result.published.year <= end_year:
-                abstract = result.summary.lower()
-                title = result.title.lower()
-                matched_terms = [term for term in query_words if term in abstract or term in title]
+                abstract_lower = result.summary.lower()
+                title_lower = result.title.lower()
+                matched_terms = [term for term in query_words if term in abstract_lower or term in title_lower]
                 if not matched_terms:
                     continue
                 relevance_prob = score_abstract_with_scibert(result.summary)
-                abstract_highlighted = result.summary.lower()
+                abstract_highlighted = result.summary
                 for term in matched_terms:
-                    abstract_highlighted = re.sub(r'\b{}\b'.format(re.escape(term)), f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
+                    abstract_highlighted = re.sub(r'\b' + re.escape(term) + r'\b', f'<b style="color: orange">{term}</b>', abstract_highlighted, flags=re.IGNORECASE)
                 
                 papers.append({
                     "id": result.entry_id.split('/')[-1],
@@ -263,7 +353,8 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
         st.error(f"Error querying arXiv: {str(e)}. Try simplifying the query.")
         return []
 
-# Download PDF and extract text
+# Download PDF and extract text with caching
+@st.cache_data
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
     pdf_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
@@ -289,7 +380,17 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
         update_log(f"PDF download failed for {paper_id}: {str(e)}")
         return f"Failed: {str(e)}", None, f"Error: {str(e)}"
 
-# Create ZIP of PDFs
+# Function for concurrent download
+def download_paper(paper):
+    if paper["pdf_url"]:
+        status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
+        paper["download_status"] = status
+        paper["pdf_path"] = pdf_path
+        paper["content"] = content
+    update_log(f"Processed paper: {paper['title']}")
+
+# Create ZIP of PDFs with caching
+@st.cache_data
 def create_pdf_zip(pdf_paths):
     zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
     try:
@@ -347,15 +448,12 @@ if search_button:
             else:
                 st.success(f"**{len(relevant_papers)}** papers with relevance > 30%. Downloading PDFs...")
                 progress_bar = st.progress(0)
-                for i, paper in enumerate(relevant_papers):
-                    if paper["pdf_url"]:
-                        status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
-                        paper["download_status"] = status
-                        paper["pdf_path"] = pdf_path
-                        paper["content"] = content
-                    progress_bar.progress((i + 1) / len(relevant_papers))
-                    time.sleep(1)  # Avoid rate-limiting
-                    update_log(f"Processed paper {i+1}/{len(relevant_papers)}: {paper['title']}")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(download_paper, paper) for paper in relevant_papers]
+                    for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                        future.result()
+                        progress_bar.progress((i + 1) / len(relevant_papers))
+                        time.sleep(0.5)  # Reduced delay to avoid rate-limiting while allowing some breathing room
                 
                 df = pd.DataFrame(relevant_papers)
                 st.subheader("Papers (Relevance > 30%)")
@@ -368,7 +466,7 @@ if search_button:
                 )
                 
                 # Create ZIP for download
-                zip_path = create_pdf_zip([p['pdf_path'] for p in relevant_papers])
+                zip_path = create_pdf_zip(tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path']))  # Use tuple for hashable cache key
                 if zip_path:
                     with open(zip_path, 'rb') as f:
                         st.download_button(
