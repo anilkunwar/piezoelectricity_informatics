@@ -15,6 +15,8 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
 import zipfile
 import concurrent.futures
+import random
+from pathlib import Path
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -73,21 +75,18 @@ def update_log(message):
 # Define normalization function with caching
 @st.cache_data
 def normalize_text(text):
-    # Replace Greek letters with Latin equivalents
     greek_to_latin = {
         'α': 'alpha', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'ε': 'epsilon',
         'Α': 'alpha', 'Β': 'beta', 'Γ': 'gamma', 'Δ': 'delta', 'Ε': 'epsilon'
     }
     for g, l in greek_to_latin.items():
         text = text.replace(g, l)
-    # Replace subscripts with digits
     subscripts = {
         '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
         '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9'
     }
     for s, d in subscripts.items():
         text = text.replace(s, d)
-    # Replace superscripts if needed (e.g., for charges)
     superscripts = {
         '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
         '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'
@@ -120,7 +119,7 @@ KEY_TERMS = [
     "crystallinity", "semicrystalline"
 ]
 
-# Define key patterns as regex for optimized matching
+# Define key patterns as regex
 KEY_PATTERNS = [
     r'\bpiezoelectric(?:ity| effect| performance| properties| coefficient| constant| polymer| materials)?\b',
     r'\belectrospun (?:nano)?fibers?|nanofiber mats|nanofibrous membranes?\b',
@@ -142,8 +141,8 @@ KEY_PATTERNS = [
     r'\bcrystallinity|semicrystalline\b',
     r'\bpyroelectric properties?|pyroelectric coefficient\b',
     r'\bdielectric properties?|dielectric constant|permittivity\b',
-    r'\bd33|d31|g33\b',  # Piezoelectric coefficients
-    r'\bpvdf-trfe|pvdf-hfp|pvdf-ctfe|p\(vdf-co-hfp\)|p\(vdf-co-trfe\)\b',  # Copolymers
+    r'\bd33|d31|g33\b',
+    r'\bpvdf-trfe|pvdf-hfp|pvdf-ctfe|p\(vdf-co-hfp\)|p\(vdf-co-trfe\)\b',
     r'\bbatio3|barium titanate\b',
     r'\bzno|zinc oxide\b',
     r'\btio2|titanium dioxide\b',
@@ -151,17 +150,17 @@ KEY_PATTERNS = [
     r'\bgraphene(?: oxide)?\b',
     r'\bcofe2o4|fe3o4|magnetic nanoparticles?\b',
     r'\bnanocomposites?|composites?\b',
-    r'\bpoling|annealing|stretching\b'  # Processing methods
+    r'\bpoling|annealing|stretching\b'
 ]
 
-# Compile patterns with caching
+# Compile patterns
 @st.cache_data
 def compile_patterns():
     return [re.compile(pat, re.IGNORECASE) for pat in KEY_PATTERNS]
 
 COMPILED_PATTERNS = compile_patterns()
 
-# SciBERT scoring with attention mechanism
+# SciBERT scoring
 @st.cache_data
 def score_abstract_with_scibert(abstract):
     try:
@@ -169,30 +168,27 @@ def score_abstract_with_scibert(abstract):
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
         abstract_normalized = normalize_text(abstract)
-        # Scoring based on regex pattern matches (OR logic), lenient with sqrt
         num_matched = sum(1 for pat in COMPILED_PATTERNS if pat.search(abstract_normalized))
         relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_PATTERNS))
         
-        # Use attention to boost if keywords present
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-        keyword_indices = [i for i, token in enumerate(tokens) if any(kw in token.lower() for kw in ['pvdf', 'piezo', 'phase', 'beta', 'alpha'])]  # Simplified keyword check for attention
+        keyword_indices = [i for i, token in enumerate(tokens) if any(kw in token.lower() for kw in ['pvdf', 'piezo', 'phase', 'beta', 'alpha'])]
         if keyword_indices:
-            attentions = outputs.attentions[-1][0, 0].numpy()  # Last layer, first head
+            attentions = outputs.attentions[-1][0, 0].numpy()
             attn_score = np.sum(attentions[keyword_indices, :]) / len(keyword_indices)
             if attn_score > 0.1:
                 relevance_prob = min(relevance_prob + 0.2 * (len(keyword_indices) / len(tokens)), 1.0)
-        update_log(f"SciBERT (attention-boosted) scored abstract: {relevance_prob:.3f} (patterns matched: {num_matched})")
+        update_log(f"SciBERT scored: {relevance_prob:.3f} (matched: {num_matched})")
         return relevance_prob
     except Exception as e:
-        update_log(f"SciBERT scoring failed: {str(e)}")
-        # Pure fallback, lenient with sqrt
+        update_log(f"SciBERT failed: {str(e)}")
         abstract_normalized = normalize_text(abstract)
         num_matched = sum(1 for pat in COMPILED_PATTERNS if pat.search(abstract_normalized))
         relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_PATTERNS))
-        update_log(f"Fallback scoring: {relevance_prob:.3f}")
+        update_log(f"Fallback score: {relevance_prob:.3f}")
         return relevance_prob
 
-# Extract text from PDF with caching
+# Extract text from PDF
 @st.cache_data
 def extract_text_from_pdf(pdf_path):
     try:
@@ -253,7 +249,7 @@ def initialize_db(db_file):
         update_log(f"Failed to initialize {db_file}: {str(e)}")
         st.error(f"Failed to initialize {db_file}: {str(e)}")
 
-# Create piezoelectricity_universe.db incrementally
+# Create universe DB
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
     try:
@@ -304,11 +300,9 @@ def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
 @st.cache_data
 def query_arxiv(query, categories, max_results, start_year, end_year):
     try:
-        api_query = query  # Use the original query with phrases and OR
-        
         client = arxiv.Client()
         search = arxiv.Search(
-            query=api_query,
+            query=query,
             max_results=max_results,
             sort_by=arxiv.SortCriterion.Relevance,
             sort_order=arxiv.SortOrder.Descending
@@ -353,43 +347,58 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
         st.error(f"Error querying arXiv: {str(e)}. Try simplifying the query.")
         return []
 
-# Download PDF and extract text with caching
-@st.cache_data
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
-    pdf_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
-    try:
-        urllib.request.urlretrieve(pdf_url, pdf_path)
-        file_size = os.path.getsize(pdf_path) / 1024
-        text = extract_text_from_pdf(pdf_path)
-        if not text.startswith("Error"):
-            paper_data = {
-                "id": paper_id,
-                "title": paper_metadata.get("title", ""),
-                "authors": paper_metadata.get("authors", "Unknown"),
-                "year": paper_metadata.get("year", 0),
-                "content": text
-            }
-            create_universe_db(paper_data)
-            update_log(f"Downloaded and extracted text for paper {paper_id} ({file_size:.2f} KB)")
-            return f"Downloaded ({file_size:.2f} KB)", pdf_path, text
-        else:
-            update_log(f"Text extraction failed for paper {paper_id}: {text}")
-            return f"Failed: {text}", None, text
-    except Exception as e:
-        update_log(f"PDF download failed for {paper_id}: {str(e)}")
-        return f"Failed: {str(e)}", None, f"Error: {str(e)}"
+# FIXED: Download PDF and extract text (NO @st.cache_data)
+@retry(stop=stop_after_attempt(4), wait=wait_fixed(2))
+def _download_single_pdf(pdf_url: str, dest_path: Path) -> float:
+    req = urllib.request.Request(pdf_url, headers={"User-Agent": "Mozilla/5.0 (compatible; PiezoelectricityTool/1.0)"})
+    with urllib.request.urlopen(req, timeout=30) as response, open(dest_path, "wb") as out_file:
+        data = response.read()
+        out_file.write(data)
+    size_kb = len(data) / 1024.0
+    if size_kb < 1:
+        raise RuntimeError("Downloaded file is empty")
+    return size_kb
 
-# Function for concurrent download
+def download_pdf_and_extract(pdf_url: str, paper_id: str, paper_metadata: dict):
+    pdf_path = Path(pdf_dir) / f"{paper_id}.pdf"
+    try:
+        size_kb = _download_single_pdf(pdf_url, pdf_path)
+        time.sleep(random.uniform(0.3, 0.8))  # Be kind to arXiv
+
+        text = extract_text_from_pdf(str(pdf_path))
+        if text.startswith("Error"):
+            raise RuntimeError(text)
+
+        paper_data = {
+            "id": paper_id,
+            "title": paper_metadata.get("title", ""),
+            "authors": paper_metadata.get("authors", "Unknown"),
+            "year": paper_metadata.get("year", 0),
+            "content": text,
+        }
+        create_universe_db(paper_data)
+
+        status = f"Downloaded ({size_kb:.1f} KB)"
+        update_log(f"Success {paper_id}: {status}")
+        return status, str(pdf_path), text
+
+    except Exception as exc:
+        msg = f"Failed: {exc}"
+        update_log(f"Download error {paper_id}: {exc}")
+        if pdf_path.exists() and pdf_path.stat().st_size == 0:
+            pdf_path.unlink(missing_ok=True)
+        return msg, None, f"Error: {exc}"
+
+# Concurrent download wrapper
 def download_paper(paper):
     if paper["pdf_url"]:
         status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
         paper["download_status"] = status
         paper["pdf_path"] = pdf_path
         paper["content"] = content
-    update_log(f"Processed paper: {paper['title']}")
+    update_log(f"Processed: {paper['title']}")
 
-# Create ZIP of PDFs with caching
+# Create ZIP
 @st.cache_data
 def create_pdf_zip(pdf_paths):
     zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
@@ -398,15 +407,15 @@ def create_pdf_zip(pdf_paths):
             for pdf in pdf_paths:
                 if pdf and os.path.exists(pdf):
                     zipf.write(pdf, os.path.basename(pdf))
-        update_log(f"Created ZIP file: {zip_path}")
+        update_log(f"Created ZIP: {zip_path}")
         return zip_path
     except Exception as e:
         update_log(f"ZIP creation failed: {str(e)}")
         return None
 
-# Main Streamlit app
+# Main UI
 st.header("arXiv Query for Piezoelectricity in Doped PVDF")
-st.markdown("Search for abstracts on **piezoelectricity**, **electrospun nanofibers**, **PVDF**, **alpha/beta phases**, **SnO2 dopants**, **efficiency**, **electricity generation**, **mechanical force** using SciBERT with attention mechanism.")
+st.markdown("Search for abstracts on **piezoelectricity**, **electrospun nanofibers**, **PVDF**, **alpha/beta phases**, **SnO2 dopants**, **efficiency**, **electricity generation**, **mechanical force** using SciBERT.")
 
 log_container = st.empty()
 def display_logs():
@@ -444,7 +453,7 @@ if search_button:
             st.success(f"Found **{len(papers)}** papers. Filtering for relevance > 30%...")
             relevant_papers = [p for p in papers if p["relevance_prob"] > 30.0]
             if not relevant_papers:
-                st.warning("No papers with relevance > 30%. Broaden query or check 'piezoelectricity_query.log'.")
+                st.warning("No papers with relevance > 30%. Check logs.")
             else:
                 st.success(f"**{len(relevant_papers)}** papers with relevance > 30%. Downloading PDFs...")
                 progress_bar = st.progress(0)
@@ -453,21 +462,18 @@ if search_button:
                     for i, future in enumerate(concurrent.futures.as_completed(futures)):
                         future.result()
                         progress_bar.progress((i + 1) / len(relevant_papers))
-                        time.sleep(0.5)  # Reduced delay to avoid rate-limiting while allowing some breathing room
+                        time.sleep(0.3)
                 
                 df = pd.DataFrame(relevant_papers)
                 st.subheader("Papers (Relevance > 30%)")
-                # Display dataframe with PDF links (arXiv cloud links)
                 df_display = df[["id", "title", "year", "categories", "abstract_highlighted", "matched_terms", "relevance_prob", "download_status"]].copy()
                 df_display["PDF Link"] = [f"[View PDF]({url})" for url in df["pdf_url"]]
-                st.dataframe(
-                    df_display,
-                    use_container_width=True
-                )
+                st.dataframe(df_display, use_container_width=True, unsafe_allow_html=True)
                 
-                # Create ZIP for download
-                zip_path = create_pdf_zip(tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path']))  # Use tuple for hashable cache key
-                if zip_path:
+                # ZIP Download
+                valid_paths = [p['pdf_path'] for p in relevant_papers if p['pdf_path'] and os.path.exists(p['pdf_path'])]
+                zip_path = create_pdf_zip(tuple(valid_paths))
+                if zip_path and os.path.exists(zip_path):
                     with open(zip_path, 'rb') as f:
                         st.download_button(
                             label="Download PDFs as ZIP",
@@ -476,26 +482,17 @@ if search_button:
                             mime="application/zip"
                         )
                 
+                # Output formats
                 if "SQLite (.db)" in output_formats:
                     sqlite_status = save_to_sqlite(df.drop(columns=["abstract_highlighted"]), [])
                     st.info(sqlite_status)
                 
                 if "CSV" in output_formats:
                     csv = df.drop(columns=["abstract_highlighted"]).to_csv(index=False)
-                    st.download_button(
-                        label="Download Paper Metadata CSV",
-                        data=csv,
-                        file_name="piezoelectricity_papers.csv",
-                        mime="text/csv"
-                    )
+                    st.download_button("Download CSV", data=csv, file_name="piezoelectricity_papers.csv", mime="text/csv")
                 
                 if "JSON" in output_formats:
                     json_data = df.drop(columns=["abstract_highlighted"]).to_json(orient="records", lines=True)
-                    st.download_button(
-                        label="Download Paper Metadata JSON",
-                        data=json_data,
-                        file_name="piezoelectricity_papers.json",
-                        mime="application/json"
-                    )
+                    st.download_button("Download JSON", data=json_data, file_name="piezoelectricity_papers.json", mime="application/json")
                 
                 display_logs()
