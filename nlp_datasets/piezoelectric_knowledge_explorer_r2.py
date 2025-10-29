@@ -49,12 +49,12 @@ os.makedirs(DB_DIR, exist_ok=True)
 pdf_dir = os.path.join(DB_DIR, "pdfs")
 os.makedirs(pdf_dir, exist_ok=True)
 
-METADATA_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_metadata.db")
-UNIVERSE_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_universe.db")
+METADATA_DB_FILE = os.path.join(DB_DIR, "piezoelectric_materials_metadata.db")
+UNIVERSE_DB_FILE = os.path.join(DB_DIR, "piezoelectric_materials_universe.db")
 
 # Logging
 logging.basicConfig(
-    filename=os.path.join(DB_DIR, 'piezoelectricity_query.log'),
+    filename=os.path.join(DB_DIR, 'piezoelectric_materials_query.log'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -70,17 +70,17 @@ def update_log(message):
         st.session_state.log_buffer.pop(0)
     logging.info(message)
 
-update_log("App initialized successfully")
+update_log("App initialized: Piezoelectric Materials Query Tool")
 
 # ========================================
 # 4. STREAMLIT APP
 # ========================================
-st.set_page_config(page_title="Piezoelectricity in PVDF Query Tool", layout="wide")
-st.title("Piezoelectricity in PVDF Query Tool with SciBERT")
+st.set_page_config(page_title="Piezoelectric Materials Query Tool", layout="wide")
+st.title("Piezoelectric Materials Query Tool with SciBERT")
 st.markdown("""
-This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants like SnO2**, focusing on **alpha/beta phase fractions**, **electrospun nanofibers**, **efficiency**, **electricity generation**, **mechanical force**, and related factors.  
-It uses **SciBERT with attention mechanism** to prioritize relevant abstracts and stores metadata in `piezoelectricity_metadata.db` and full PDF text in `piezoelectricity_universe.db`.  
-PDFs and databases can be downloaded as ZIP.
+This tool queries arXiv for **piezoelectric materials** such as **PVDF**, **BaTiO₃**, **PZT**, **ZnO**, **PMN-PT**, focusing on **d33**, **energy harvesting**, **nanogenerators**, **flexible piezoelectrics**, **phase transitions**, and **applications in sensors & actuators**.  
+Uses **SciBERT + attention weighting** to rank abstracts. Stores metadata in `piezoelectric_materials_metadata.db` and full text in `piezoelectric_materials_universe.db`.  
+PDFs + DBs downloadable as ZIP.
 """)
 
 # Dependency check
@@ -157,26 +157,26 @@ def load_scibert_model():
 scibert_tokenizer, scibert_model = load_scibert_model()
 
 # ========================================
-# 7. KEY TERMS AND SCORING
+# 7. KEY TERMS AND PATTERNS
 # ========================================
 KEY_TERMS = [
-    "piezoelectricity", "electrospun nanofibers", "PVDF", "alpha phase", "beta phase",
-    "SnO2", "dopants", "efficiency", "electricity generation", "mechanical force",
-    "nanogenerators", "d33", "energy harvesting", "doped PVDF"
+    "piezoelectric", "PVDF", "BaTiO3", "PZT", "ZnO", "PMN-PT", "d33", "energy harvesting",
+    "nanogenerator", "flexible", "sensor", "actuator", "phase transition", "poling", "ferroelectric"
 ]
 
 KEY_PATTERNS = [
-    r'\bpiezoelectric(?:ity| effect| performance| properties| coefficient| constant| polymer| materials| harvester| generator)?\b',
-    r'\belectrospun (?:nano)?fibers?|nanofiber mats|electrospinning\b',
-    r'\bpvdf|polyvinylidene fluoride|pvd?f|p\(vdf-trfe\)|p\(vdf-hfp\)\b',
-    r'\b(alpha|beta|gamma|delta)\s*(?:phase|polymorph)\b',
-    r'\bsno2|tin oxide|tin dioxide\b',
-    r'\bdopants?|doped|doping|additives?\b',
-    r'\befficiency|conversion efficiency\b',
-    r'\belectricity generation|power output|voltage output\b',
-    r'\bmechanical (?:force|stress|deformation|energy)\b',
-    r'\bd33|d31|g33\b',
-    r'\benergy harvesting|nanogenerators?\b'
+    r'\bpiezoelectric(?:ity| materials?| effect| response| coefficient| constant| polymer| ceramic)?\b',
+    r'\bpvdf|polyvinylidene fluoride|p\(vdf-trfe\)|p\(vdf-hfp\)\b',
+    r'\bbatio3|barium titanate|ba\.? ?tio3\b',
+    r'\bpzt|lead zirconate titanate|pb\(zr,ti\)o3\b',
+    r'\bzno|zinc oxide\b',
+    r'\bpmn-pt|pmm-pt|pmn–pt\b',
+    r'\bd33|d31|g33|piezoelectric coefficient\b',
+    r'\benergy harvesting|nanogenerators?\b',
+    r'\bflexible|wearable|stretchable\b',
+    r'\bsensor|actuator|transducer\b',
+    r'\bphase transition|alpha|beta|gamma|polymorph\b',
+    r'\bpoling|electric field|ferroelectric|domain\b'
 ]
 
 @st.cache_data
@@ -423,7 +423,7 @@ def download_paper(paper):
 # 14. FILE MANAGEMENT
 # ========================================
 def create_pdf_zip(pdf_paths):
-    zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
+    zip_path = os.path.join(DB_DIR, "piezoelectric_materials_pdfs.zip")
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for pdf_path in pdf_paths:
@@ -446,8 +446,8 @@ def read_file_for_download(file_path):
 # ========================================
 # 15. STREAMLIT UI
 # ========================================
-st.header("arXiv Query for Piezoelectricity in Doped PVDF")
-st.markdown("Search for **PVDF**, **SnO2 dopants**, **beta phase**, **nanofibers**, **energy harvesting** using SciBERT.")
+st.header("arXiv Query for Piezoelectric Materials")
+st.markdown("Search for **PVDF**, **BaTiO₃**, **PZT**, **energy harvesting**, **d33**, **nanogenerators**, **flexible piezoelectrics** using SciBERT.")
 
 log_container = st.empty()
 def display_logs():
@@ -457,7 +457,7 @@ def display_logs():
 with st.sidebar:
     st.subheader("Search Parameters")
     query = st.text_input("Query", value=' OR '.join([f'"{t}"' for t in KEY_TERMS]), key="query_input")
-    default_categories = ["cond-mat.mtrl-sci", "physics.app-ph"]
+    default_categories = ["cond-mat.mtrl-sci", "physics.app-ph", "physics.chem-ph"]
     categories = st.multiselect("Categories", default_categories, default=default_categories, key="categories_select")
     max_results = st.slider("Max Papers", 1, 200, 10, key="max_results_slider")
     current_year = datetime.now().year
@@ -483,7 +483,12 @@ with st.sidebar:
 
 # Reset
 if reset_downloads_button:
-    reset_downloads()
+    st.session_state.download_files = {"pdf_paths": [], "zip_path": None}
+    st.session_state.search_results = None
+    st.session_state.relevant_papers = None
+    query_arxiv.clear()
+    cleanup_memory()
+    update_log("Downloads reset")
     st.success("Downloads reset.")
 
 # Batch convert
@@ -522,7 +527,7 @@ if search_button:
         try:
             if not system_health_check():
                 st.error("Health check failed.")
-                reset_processing()
+                st.session_state.processing = False
                 st.stop()
             
             with st.spinner("Querying arXiv..."):
@@ -573,7 +578,7 @@ if search_button:
                             st.session_state.download_files["zip_path"] = zip_path
                             data = read_file_for_download(zip_path)
                             if data:
-                                st.download_button("Download All PDFs as ZIP", data, "piezoelectricity_pdfs.zip", "application/zip", key=f"zip_{time.time()}")
+                                st.download_button("Download All PDFs as ZIP", data, "piezoelectric_materials_pdfs.zip", "application/zip", key=f"zip_{time.time()}")
                     
                     st.subheader("Database Downloads")
                     for db_file, name in [(METADATA_DB_FILE, "Metadata DB"), (UNIVERSE_DB_FILE, "Universe DB")]:
@@ -609,4 +614,4 @@ if st.session_state.log_buffer:
             st.text(log)
 
 st.markdown("---")
-st.markdown("*Cloud-optimized • No Errors • Full Downloads • Relevance Slider*")
+st.markdown("*Cloud-optimized • Piezoelectric Materials • Relevance Slider • Full Downloads*")
