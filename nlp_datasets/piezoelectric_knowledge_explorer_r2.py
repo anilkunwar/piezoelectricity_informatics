@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-#  Piezoelectricity in PVDF – FINAL, NO DUPLICATE KEYS
+#  Piezoelectricity in PVDF – Full-featured, Cloud-ready
 # --------------------------------------------------------------
 import arxiv
 import fitz
@@ -25,10 +25,11 @@ import json
 from transformers import AutoTokenizer, AutoModel
 import torch
 import numpy as np
+from scipy.special import softmax
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 # -------------------------- CONFIG --------------------------
-if os.path.exists("/tmp"):
+if os.path.exists("/tmp"):                     # Streamlit Cloud / most clouds
     DB_DIR = "/tmp"
 else:
     DB_DIR = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -58,9 +59,17 @@ All PDFs, metadata and full-text are stored and downloadable.
 )
 
 # -------------------------- SESSION STATE --------------------------
-for key in ["log_buffer", "processing", "download_files", "search_results", "relevant_papers"]:
+for key in [
+    "log_buffer",
+    "processing",
+    "download_files",
+    "search_results",
+    "relevant_papers",
+]:
     if key not in st.session_state:
-        st.session_state[key] = [] if key == "log_buffer" else False if key == "processing" else {"pdf_paths": [], "zip_path": None}
+        st.session_state[key] = (
+            [] if key == "log_buffer" else False if key == "processing" else {"pdf_paths": [], "zip_path": None}
+        )
 
 def update_log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -151,9 +160,11 @@ def score_abstract(abstract: str) -> float:
         enc = scibert_tok(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True)
         with torch.no_grad():
             out = scibert_mdl(**enc, output_attentions=True)
+        # ---- pattern count ----
         n = sum(bool(p.search(norm(abstract))) for p in COMPILED)
         prob = np.sqrt(n) / np.sqrt(len(KEY_PATTERNS))
 
+        # ---- attention boost ----
         toks = scibert_tok.convert_ids_to_tokens(enc["input_ids"][0])
         kw_idx = [i for i, t in enumerate(toks) if any(k in t.lower() for k in ["pvdf","piezo","phase","beta","alpha"])]
         if kw_idx:
@@ -254,7 +265,7 @@ def query_arxiv(_query: str, cats: list, max_res: int, sy: int, ey: int):
             break
     return sorted(out, key=lambda x: x["relevance_prob"], reverse=True)
 
-# -------------------------- PDF DOWNLOAD --------------------------
+# -------------------------- PDF DOWNLOAD (THREAD-SAFE) --------------------------
 @retry(stop=stop_after_attempt(4), wait=wait_fixed(2))
 def _download(url: str, dest: Path) -> float:
     req = requests.Request("GET", url,
@@ -306,21 +317,7 @@ def make_zip(paths: list) -> str:
                 z.write(p, os.path.basename(p))
     return zip_path
 
-# -------------------------- LOG AREA (FIXED KEY) --------------------------
-log_placeholder = st.empty()
-
-def show_logs():
-    if st.session_state.log_buffer:
-        log_placeholder.text_area(
-            "Processing Logs",
-            "\n".join(st.session_state.log_buffer[-30:]),
-            height=180,
-            key="log_area"  # <-- FIXED: ONE KEY ONLY
-        )
-    else:
-        log_placeholder.text_area("Processing Logs", "No logs yet.", height=180, key="log_area")
-
-# -------------------------- SIDEBAR --------------------------
+# -------------------------- UI --------------------------
 with st.sidebar:
     st.header("Search")
     q = st.text_input("Query", value=' OR '.join(f'"{t}"' for t in [
@@ -341,8 +338,18 @@ with st.sidebar:
 if reset_btn:
     for k in list(st.session_state.keys()):
         del st.session_state[k]
-    st.success("Reset – reloading…")
-    st.rerun()
+    st.success("Reset – reload the page")
+    st.experimental_rerun()
+
+log_area = st.empty()
+def show_logs():
+    if st.session_state.log_buffer:
+        log_area.text_area(
+            "Logs",
+            "\n".join(st.session_state.log_buffer[-30:]),
+            height=180,
+            key=f"log_{int(time.time())}",   # <-- unique key every render
+        )
 
 # -------------------------- MAIN LOGIC --------------------------
 if search_btn:
@@ -381,6 +388,7 @@ if search_btn:
                 prog.empty()
                 stat.empty()
 
+                # Store for later download buttons
                 st.session_state.relevant_papers = relevant
                 st.session_state.download_files["pdf_paths"] = paths
                 zip_path = make_zip(paths)
@@ -393,25 +401,51 @@ if search_btn:
                     use_container_width=True,
                 )
 
+                # ---- OUTPUT ----
                 if "SQLite" in out_fmt:
                     save_metadata(df.drop(columns=["content"], errors="ignore"))
-                    st.info("Metadata saved")
+                    st.info("Metadata saved to DB")
                 if "CSV" in out_fmt:
-                    st.download_button("CSV", df.to_csv(index=False), "piezoelectricity_papers.csv", "text/csv", key="csv_dl")
+                    st.download_button(
+                        "CSV",
+                        df.to_csv(index=False),
+                        "piezoelectricity_papers.csv",
+                        "text/csv",
+                        key=f"csv_{int(time.time())}",
+                    )
                 if "JSON" in out_fmt:
-                    st.download_button("JSON", df.to_json(orient="records"), "piezoelectricity_papers.json", "application/json", key="json_dl")
+                    st.download_button(
+                        "JSON",
+                        df.to_json(orient="records"),
+                        "piezoelectricity_papers.json",
+                        "application/json",
+                        key=f"json_{int(time.time())}",
+                    )
 
+                # ---- ZIP ----
                 if zip_path and os.path.exists(zip_path):
                     with open(zip_path, "rb") as f:
-                        st.download_button("All PDFs (ZIP)", f.read(), "piezoelectricity_pdfs.zip", "application/zip", key="zip_dl")
+                        st.download_button(
+                            "All PDFs (ZIP)",
+                            f.read(),
+                            "piezoelectricity_pdfs.zip",
+                            "application/zip",
+                            key=f"zip_{int(time.time())}",
+                        )
 
+                # ---- DB files ----
                 for name, path in [("Metadata DB", METADATA_DB), ("Universe DB", UNIVERSE_DB)]:
                     if os.path.exists(path):
                         with open(path, "rb") as f:
-                            st.download_button(name, f.read(), os.path.basename(path), "application/octet-stream", key=f"db_{name}")
-
+                            st.download_button(
+                                name,
+                                f.read(),
+                                os.path.basename(path),
+                                "application/octet-stream",
+                                key=f"db_{name}_{int(time.time())}",
+                            )
         st.session_state.processing = False
         show_logs()
 
-# Always show logs
+# Always show logs (outside any conditional block)
 show_logs()
