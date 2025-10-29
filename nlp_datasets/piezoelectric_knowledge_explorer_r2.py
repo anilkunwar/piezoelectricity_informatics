@@ -1,11 +1,10 @@
 # --------------------------------------------------------------
-#  Piezoelectricity in PVDF – FINAL, NO ERRORS, PRODUCTION READY
-#  st.set_page_config() is FIRST!
+#  Piezoelectricity in PVDF – FINAL, NO DUPLICATE KEYS
 # --------------------------------------------------------------
-import streamlit as st
 import arxiv
 import fitz
 import pandas as pd
+import streamlit as st
 import os
 import re
 import sqlite3
@@ -28,10 +27,6 @@ import torch
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-# ====================== MUST BE FIRST ======================
-st.set_page_config(page_title="Piezoelectricity in PVDF", layout="wide")
-# ==========================================================
-
 # -------------------------- CONFIG --------------------------
 if os.path.exists("/tmp"):
     DB_DIR = "/tmp"
@@ -51,19 +46,21 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+# -------------------------- STREAMLIT UI --------------------------
+st.set_page_config(page_title="Piezoelectricity in PVDF", layout="wide")
+st.title("Piezoelectricity in PVDF – SciBERT + Full-text Search")
+st.markdown(
+    """
+Search arXiv for **piezoelectricity in PVDF** (dopants, α/β phases, electro-spinning, efficiency …).  
+SciBERT scores abstracts; a **slider** lets you set the relevance cut-off.  
+All PDFs, metadata and full-text are stored and downloadable.
+"""
+)
+
 # -------------------------- SESSION STATE --------------------------
-if "log_buffer" not in st.session_state:
-    st.session_state.log_buffer = []
-if "search_results" not in st.session_state:
-    st.session_state.search_results = None
-if "relevant_papers" not in st.session_state:
-    st.session_state.relevant_papers = None
-if "download_paths" not in st.session_state:
-    st.session_state.download_paths = []
-if "zip_path" not in st.session_state:
-    st.session_state.zip_path = None
-if "metadata_saved" not in st.session_state:
-    st.session_state.metadata_saved = False
+for key in ["log_buffer", "processing", "download_files", "search_results", "relevant_papers"]:
+    if key not in st.session_state:
+        st.session_state[key] = [] if key == "log_buffer" else False if key == "processing" else {"pdf_paths": [], "zip_path": None}
 
 def update_log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -80,12 +77,18 @@ def mem_usage():
     except:
         return 0
 
+def cleanup():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 def health_check():
     mem = mem_usage()
     free_gb = psutil.disk_usage(DB_DIR).free / (1024**3)
     update_log(f"RAM {mem:.1f} MB | Disk free {free_gb:.1f} GB")
     if mem > 1500:
         st.warning(f"High RAM ({mem:.1f} MB)")
+        cleanup()
     if free_gb < 0.5:
         st.error("Low disk space")
         return False
@@ -164,7 +167,7 @@ def score_abstract(abstract: str) -> float:
         n = sum(bool(p.search(norm(abstract))) for p in COMPILED)
         return np.sqrt(n) / np.sqrt(len(KEY_PATTERNS))
 
-# -------------------------- PDF FUNCTIONS --------------------------
+# -------------------------- PDF TEXT --------------------------
 @st.cache_data
 def pdf_text(path: str) -> str:
     try:
@@ -175,57 +178,47 @@ def pdf_text(path: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
-@retry(stop=stop_after_attempt(4), wait=wait_fixed(2))
-def _download(url: str, dest: Path) -> float:
-    req = requests.Request("GET", url, headers={"User-Agent": "PiezoelectricityTool/1.0"})
-    prep = req.prepare()
-    s = retry_session()
-    resp = s.send(prep, timeout=30)
-    resp.raise_for_status()
-    with open(dest, "wb") as f:
-        f.write(resp.content)
-    kb = len(resp.content) / 1024
-    if kb < 1:
-        raise RuntimeError("Empty file")
-    return kb
+# -------------------------- DATABASE --------------------------
+def init_db(path: str):
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    if "universe" in path:
+        c.execute("""CREATE TABLE IF NOT EXISTS papers
+                     (id TEXT PRIMARY KEY, title TEXT, authors TEXT, year INTEGER, content TEXT)""")
+    else:
+        c.execute("""CREATE TABLE IF NOT EXISTS papers
+                     (id TEXT PRIMARY KEY, title TEXT, authors TEXT, year INTEGER,
+                      categories TEXT, abstract TEXT, pdf_url TEXT,
+                      download_status TEXT, matched_terms TEXT,
+                      relevance_prob REAL, pdf_path TEXT, content TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS parameters
+                     (paper_id TEXT, entity_text TEXT, entity_label TEXT,
+                      value REAL, unit TEXT, context TEXT, phase TEXT,
+                      score REAL, co_occurrence BOOLEAN,
+                      FOREIGN KEY(paper_id) REFERENCES papers(id))""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pid ON parameters(paper_id)")
+    conn.commit()
+    conn.close()
 
-def download_one(paper: dict) -> dict:
-    pid = paper["id"]
-    dest = Path(pdf_dir) / f"{pid}.pdf"
-    try:
-        kb = _download(paper["pdf_url"], dest)
-        time.sleep(random.uniform(0.4, 0.9))
-        txt = pdf_text(str(dest))
-        if txt.startswith("Error"):
-            raise RuntimeError(txt)
-        
-        # Update universe DB
-        conn = sqlite3.connect(UNIVERSE_DB)
-        c = conn.cursor()
-        c.execute("""INSERT OR REPLACE INTO papers
-                     (id, title, authors, year, content)
-                     VALUES (?,?,?,?,?)""",
-                  (pid, paper.get("title",""), paper.get("authors","Unknown"),
-                   paper.get("year",0), txt))
-        conn.commit()
-        conn.close()
-        
-        paper.update({
-            "download_status": f"Downloaded ({kb:.1f} KB)",
-            "pdf_path": str(dest),
-            "content": txt,
-        })
-        update_log(f"Success: {pid}: {kb:.1f} KB")
-    except Exception as e:
-        paper.update({
-            "download_status": f"Failed: {str(e)[:50]}",
-            "pdf_path": None,
-            "content": f"Error: {e}",
-        })
-        if dest.exists() and dest.stat().st_size == 0:
-            dest.unlink(missing_ok=True)
-        update_log(f"Failed: {pid}: {e}")
-    return paper
+init_db(METADATA_DB)
+init_db(UNIVERSE_DB)
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def universe_insert(paper: dict):
+    conn = sqlite3.connect(UNIVERSE_DB)
+    c = conn.cursor()
+    c.execute("""INSERT OR REPLACE INTO papers
+                 (id, title, authors, year, content)
+                 VALUES (?,?,?,?,?)""",
+              (paper["id"], paper.get("title",""), paper.get("authors","Unknown"),
+               paper.get("year",0), paper.get("content","")))
+    conn.commit()
+    conn.close()
+
+def† save_metadata(df: pd.DataFrame):
+    conn = sqlite3.connect(METADATA_DB)
+    df.to_sql("papers", conn, if_exists="replace", index=False)
+    conn.close()
 
 # -------------------------- ARXIV QUERY --------------------------
 @st.cache_data(ttl=3600)
@@ -261,10 +254,51 @@ def query_arxiv(_query: str, cats: list, max_res: int, sy: int, ey: int):
             break
     return sorted(out, key=lambda x: x["relevance_prob"], reverse=True)
 
-# -------------------------- ZIP & METADATA --------------------------
+# -------------------------- PDF DOWNLOAD --------------------------
+@retry(stop=stop_after_attempt(4), wait=wait_fixed(2))
+def _download(url: str, dest: Path) -> float:
+    req = requests.Request("GET", url,
+                           headers={"User-Agent": "PiezoelectricityTool/1.0"})
+    prep = req.prepare()
+    s = retry_session()
+    resp = s.send(prep, timeout=30)
+    resp.raise_for_status()
+    with open(dest, "wb") as f:
+        f.write(resp.content)
+    kb = len(resp.content) / 1024
+    if kb < 1:
+        raise RuntimeError("Empty file")
+    return kb
+
+def download_one(paper: dict) -> dict:
+    pid = paper["id"]
+    dest = Path(pdf_dir) / f"{pid}.pdf"
+    try:
+        kb = _download(paper["pdf_url"], dest)
+        time.sleep(random.uniform(0.4, 0.9))
+        txt = pdf_text(str(dest))
+        if txt.startswith("Error"):
+            raise RuntimeError(txt)
+        universe_insert({"id": pid, "title": paper["title"],
+                         "authors": paper["authors"], "year": paper["year"],
+                         "content": txt})
+        paper.update({
+            "download_status": f"Downloaded ({kb:.1f} KB)",
+            "pdf_path": str(dest),
+            "content": txt,
+        })
+    except Exception as e:
+        paper.update({
+            "download_status": f"Failed: {e}",
+            "pdf_path": None,
+            "content": f"Error: {e}",
+        })
+        if dest.exists() and dest.stat().st_size == 0:
+            dest.unlink(missing_ok=True)
+    return paper
+
+# -------------------------- ZIP --------------------------
 def make_zip(paths: list) -> str:
-    if not paths:
-        return None
     zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for p in paths:
@@ -272,159 +306,112 @@ def make_zip(paths: list) -> str:
                 z.write(p, os.path.basename(p))
     return zip_path
 
-def save_metadata(df: pd.DataFrame):
-    conn = sqlite3.connect(METADATA_DB)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS papers
-                 (id TEXT PRIMARY KEY, title TEXT, authors TEXT, year INTEGER,
-                  categories TEXT, abstract TEXT, pdf_url TEXT,
-                  download_status TEXT, matched_terms TEXT,
-                  relevance_prob REAL, pdf_path TEXT, content TEXT)""")
-    df.to_sql("papers", conn, if_exists="replace", index=False)
-    conn.commit()
-    conn.close()
-    st.session_state.metadata_saved = True
-
-# -------------------------- UI --------------------------
-st.title("Piezoelectricity in PVDF Explorer")
-st.markdown("**SciBERT-powered search** for PVDF piezoelectricity (α/β phases, dopants, electrospinning, efficiency…)")
-
-# Fixed log area
+# -------------------------- LOG AREA (FIXED KEY) --------------------------
 log_placeholder = st.empty()
+
 def show_logs():
     if st.session_state.log_buffer:
         log_placeholder.text_area(
             "Processing Logs",
-            "\n".join(st.session_state.log_buffer[-25:]),
-            height=200,
-            key="log_area_fixed"
+            "\n".join(st.session_state.log_buffer[-30:]),
+            height=180,
+            key="log_area"  # <-- FIXED: ONE KEY ONLY
         )
     else:
-        log_placeholder.info("Ready to search…")
-show_logs()
+        log_placeholder.text_area("Processing Logs", "No logs yet.", height=180, key="log_area")
 
 # -------------------------- SIDEBAR --------------------------
 with st.sidebar:
-    st.header("Search Parameters")
-    default_query = ' OR '.join(f'"{t}"' for t in [
+    st.header("Search")
+    q = st.text_input("Query", value=' OR '.join(f'"{t}"' for t in [
         "piezoelectricity", "PVDF", "beta phase", "electrospun nanofibers",
         "SnO2", "dopants", "efficiency", "nanogenerators"
-    ])
-    q = st.text_input("Query", value=default_query, key="query_input")
-    
-    cats = st.multiselect("Categories", 
-                         ["cond-mat.mtrl-sci", "physics.app-ph", "physics.chem-ph"],
-                         default=["cond-mat.mtrl-sci", "physics.app-ph"], 
-                         key="cat_select")
-    
+    ]), key="q_input")
+    cats = st.multiselect("Categories", ["cond-mat.mtrl-sci", "physics.app-ph"],
+                          default=["cond-mat.mtrl-sci"], key="cat_sel")
+    max_res = st.slider("Max results", 1, 200, 30, key="max_res")
     col1, col2 = st.columns(2)
-    max_res = col1.slider("Max results", 5, 100, 30, key="max_results")
-    sy = col2.number_input("Start year", 2000, 2025, 2015, key="start_year")
-    
-    ey = st.number_input("End year", sy, 2025, 2025, key="end_year")
-    rel_thr = st.slider("Relevance threshold (%)", 0, 100, 30, key="rel_threshold")
-    
-    st.header("Output")
-    out_fmt = st.multiselect("Formats", ["SQLite", "CSV", "JSON"], default=["SQLite", "CSV"], key="output_formats")
-    
-    col3, col4 = st.columns(2)
-    with col3:
-        search_trigger = st.button("Search arXiv", key="search_button", use_container_width=True)
-    with col4:
-        if st.button("Clear Results", key="clear_button", use_container_width=True):
-            for k in ["search_results", "relevant_papers", "download_paths", "zip_path", "metadata_saved"]:
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.success("Cleared")
-            st.rerun()
+    sy = col1.number_input("Start year", 1990, datetime.now().year, 2010, key="sy")
+    ey = col2.number_input("End year", sy, datetime.now().year, datetime.now().year, key="ey")
+    rel_thr = st.slider("Relevance threshold (%)", 0, 100, 30, key="rel_thr")
+    out_fmt = st.multiselect("Output", ["SQLite", "CSV", "JSON"], default=["SQLite"], key="out_fmt")
+    search_btn = st.button("Search arXiv", key="search_btn")
+    reset_btn = st.button("Reset", key="reset_btn")
+
+if reset_btn:
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.success("Reset – reloading…")
+    st.rerun()
 
 # -------------------------- MAIN LOGIC --------------------------
-if search_trigger:
+if search_btn:
     if not q.strip() or not cats or sy > ey:
-        st.error("Please fix inputs")
-    elif not health_check():
-        st.stop()
+        st.error("Check inputs")
     else:
-        with st.spinner("Querying arXiv + SciBERT scoring…"):
-            st.session_state.search_results = query_arxiv(q, cats, max_res, sy, ey)
-        st.rerun()
+        st.session_state.processing = True
+        if not health_check():
+            st.stop()
 
-# Show results
-if st.session_state.search_results is not None:
-    all_papers = st.session_state.search_results
-    relevant = [p for p in all_papers if p["relevance_prob"] >= rel_thr]
-    
-    col1, col2, col3 = st.columns([1, 3, 1])
-    col1.metric("Total papers", len(all_papers))
-    col2.metric("Relevant papers", len(relevant), f"≥ {rel_thr}%")
-    col3.metric("PDFs ready", len([p for p in relevant if p.get("pdf_path")]))
-    
-    if relevant:
-        if not any(p.get("pdf_path") for p in relevant):
-            with st.spinner(f"Downloading {len(relevant)} PDFs…"):
+        with st.spinner("Querying arXiv…"):
+            all_papers = query_arxiv(q, cats, max_res, sy, ey)
+
+        if not all_papers:
+            st.warning("No papers found")
+        else:
+            relevant = [p for p in all_papers if p["relevance_prob"] >= rel_thr]
+            st.success(f"**{len(relevant)}** papers ≥ {rel_thr}% relevance")
+
+            if relevant:
+                prog = st.progress(0)
+                stat = st.empty()
+                paths = []
+
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as exe:
                     futures = {exe.submit(download_one, p): i for i, p in enumerate(relevant)}
                     for fut in concurrent.futures.as_completed(futures):
                         idx = futures[fut]
-                        relevant[idx] = fut.result()
-                
-                paths = [p.get("pdf_path") for p in relevant if p.get("pdf_path")]
-                st.session_state.relevant_papers = relevant
-                st.session_state.download_paths = paths
-                zip_p = make_zip(paths)
-                st.session_state.zip_path = zip_p
-                if "SQLite" in out_fmt:
-                    save_metadata(pd.DataFrame(relevant))
-        
-        df = pd.DataFrame(relevant)
-        st.subheader("Results")
-        
-        # Add individual PDF buttons
-        pdf_buttons = []
-        for _, row in df.iterrows():
-            if row.get("pdf_path") and os.path.exists(row["pdf_path"]):
-                with open(row["pdf_path"], "rb") as f:
-                    pdf_buttons.append(
-                        st.download_button(
-                            label="PDF",
-                            data=f.read(),
-                            file_name=f"{row['id']}.pdf",
-                            mime="application/pdf",
-                            key=f"pdf_{row['id']}"
-                        )
-                    )
-            else:
-                pdf_buttons.append("Failed")
-        
-        df_display = df[["id", "title", "year", "relevance_prob", "download_status"]].copy()
-        df_display["PDF"] = pdf_buttons
-        st.dataframe(df_display, use_container_width=True, hide_index=True)
-        
-        # Bulk downloads
-        st.subheader("Bulk Downloads")
-        col_bulk1, col_bulk2, col_bulk3 = st.columns(3)
-        
-        if st.session_state.zip_path and os.path.exists(st.session_state.zip_path):
-            with open(st.session_state.zip_path, "rb") as f:
-                col_bulk1.download_button("All PDFs (ZIP)", f.read(), "piezoelectricity_pdfs.zip", "application/zip")
-        
-        if "CSV" in out_fmt:
-            col_bulk2.download_button("CSV", df.to_csv(index=False), "piezoelectricity_papers.csv", "text/csv")
-        
-        if "JSON" in out_fmt:
-            col_bulk3.download_button("JSON", df.to_json(orient="records", indent=2), "piezoelectricity_papers.json", "application/json")
-        
-        if st.session_state.metadata_saved:
-            st.subheader("Database Files")
-            col_db1, col_db2 = st.columns(2)
-            if os.path.exists(METADATA_DB):
-                with open(METADATA_DB, "rb") as f:
-                    col_db1.download_button("Metadata DB", f.read(), "piezoelectricity_metadata.db", "application/octet-stream")
-            if os.path.exists(UNIVERSE_DB):
-                with open(UNIVERSE_DB, "rb") as f:
-                    col_db2.download_button("Full-text DB", f.read(), "piezoelectricity_universe.db", "application/octet-stream")
-    
-    else:
-        st.warning(f"No papers above {rel_thr}% relevance")
+                        paper = fut.result()
+                        relevant[idx] = paper
+                        if paper["pdf_path"]:
+                            paths.append(paper["pdf_path"])
+                        prog.progress((idx + 1) / len(relevant))
+                        stat.text(f"{idx+1}/{len(relevant)} – {paper['title'][:60]}…")
 
+                prog.empty()
+                stat.empty()
+
+                st.session_state.relevant_papers = relevant
+                st.session_state.download_files["pdf_paths"] = paths
+                zip_path = make_zip(paths)
+                st.session_state.download_files["zip_path"] = zip_path
+
+                df = pd.DataFrame(relevant)
+                st.subheader("Results")
+                st.dataframe(
+                    df[["id", "title", "year", "relevance_prob", "download_status"]],
+                    use_container_width=True,
+                )
+
+                if "SQLite" in out_fmt:
+                    save_metadata(df.drop(columns=["content"], errors="ignore"))
+                    st.info("Metadata saved")
+                if "CSV" in out_fmt:
+                    st.download_button("CSV", df.to_csv(index=False), "piezoelectricity_papers.csv", "text/csv", key="csv_dl")
+                if "JSON" in out_fmt:
+                    st.download_button("JSON", df.to_json(orient="records"), "piezoelectricity_papers.json", "application/json", key="json_dl")
+
+                if zip_path and os.path.exists(zip_path):
+                    with open(zip_path, "rb") as f:
+                        st.download_button("All PDFs (ZIP)", f.read(), "piezoelectricity_pdfs.zip", "application/zip", key="zip_dl")
+
+                for name, path in [("Metadata DB", METADATA_DB), ("Universe DB", UNIVERSE_DB)]:
+                    if os.path.exists(path):
+                        with open(path, "rb") as f:
+                            st.download_button(name, f.read(), os.path.basename(path), "application/octet-stream", key=f"db_{name}")
+
+        st.session_state.processing = False
+        show_logs()
+
+# Always show logs
 show_logs()
