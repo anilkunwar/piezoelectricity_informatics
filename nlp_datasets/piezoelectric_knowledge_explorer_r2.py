@@ -16,14 +16,16 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 import zipfile
 import concurrent.futures
 import altair as alt
+import io
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
 METADATA_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_metadata.db")
 UNIVERSE_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_universe.db")
+LOG_FILE = os.path.join(DB_DIR, 'piezoelectricity_query.log')
 
 # Initialize logging
-logging.basicConfig(filename=os.path.join(DB_DIR, 'piezoelectricity_query.log'), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Streamlit app
 st.set_page_config(page_title="Piezoelectricity in PVDF Query Tool", layout="wide")
@@ -417,6 +419,39 @@ def create_pdf_zip(pdf_paths_tuple):
         update_log(f"ZIP creation failed: {str(e)}")
         return None
 
+# Create a comprehensive ZIP with all files
+def create_all_files_zip(relevant_papers, df, output_formats):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as zipf:
+        # Add PDFs
+        for paper in relevant_papers:
+            pdf_path = paper.get('pdf_path')
+            if pdf_path and os.path.exists(pdf_path):
+                zipf.write(pdf_path, os.path.basename(pdf_path))
+        
+        # Add DB files
+        if os.path.exists(METADATA_DB_FILE):
+            zipf.write(METADATA_DB_FILE, os.path.basename(METADATA_DB_FILE))
+        if os.path.exists(UNIVERSE_DB_FILE):
+            zipf.write(UNIVERSE_DB_FILE, os.path.basename(UNIVERSE_DB_FILE))
+        
+        # Add log file
+        if os.path.exists(LOG_FILE):
+            zipf.write(LOG_FILE, os.path.basename(LOG_FILE))
+        
+        # Add CSV if selected
+        if "CSV" in output_formats:
+            csv_data = df.drop(columns=["abstract_highlighted"]).to_csv(index=False)
+            zipf.writestr("piezoelectricity_papers.csv", csv_data)
+        
+        # Add JSON if selected
+        if "JSON" in output_formats:
+            json_data = df.drop(columns=["abstract_highlighted"]).to_json(orient="records", lines=True)
+            zipf.writestr("piezoelectricity_papers.json", json_data)
+    
+    buffer.seek(0)
+    return buffer
+
 # Main Streamlit app
 st.header("arXiv Query for Piezoelectricity in Doped PVDF")
 st.markdown("Search for abstracts on **piezoelectricity**, **electrospun nanofibers**, **PVDF**, **alpha/beta phases**, **SnO2 dopants**, **efficiency**, **electricity generation**, **mechanical force** using SciBERT with attention mechanism.")
@@ -500,37 +535,55 @@ if st.session_state.df is not None:
     )
     st.altair_chart(chart, use_container_width=True)
     
-    # Create ZIP for download
-    pdf_paths_tuple = tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path'])
-    zip_path = create_pdf_zip(pdf_paths_tuple)
-    if zip_path:
-        with open(zip_path, 'rb') as f:
-            st.download_button(
-                label="Download PDFs as ZIP",
-                data=f,
-                file_name="piezoelectricity_pdfs.zip",
-                mime="application/zip"
-            )
+    st.subheader("Downloads")
+    col1, col2, col3 = st.columns(3)
     
-    # Download DB files if exist
-    if os.path.exists(METADATA_DB_FILE):
-        with open(METADATA_DB_FILE, 'rb') as f:
-            st.download_button(
-                label="Download Metadata DB",
-                data=f,
-                file_name="piezoelectricity_metadata.db",
-                mime="application/octet-stream"
-            )
+    with col1:
+        # Create ZIP for PDFs
+        pdf_paths_tuple = tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path'])
+        zip_path = create_pdf_zip(pdf_paths_tuple)
+        if zip_path:
+            with open(zip_path, 'rb') as f:
+                st.download_button(
+                    label="Download PDFs as ZIP",
+                    data=f,
+                    file_name="piezoelectricity_pdfs.zip",
+                    mime="application/zip"
+                )
     
-    if os.path.exists(UNIVERSE_DB_FILE):
-        with open(UNIVERSE_DB_FILE, 'rb') as f:
-            st.download_button(
-                label="Download Universe DB",
-                data=f,
-                file_name="piezoelectricity_universe.db",
-                mime="application/octet-stream"
-            )
+    with col2:
+        # Download Metadata DB
+        if os.path.exists(METADATA_DB_FILE):
+            with open(METADATA_DB_FILE, 'rb') as f:
+                st.download_button(
+                    label="Download Metadata DB",
+                    data=f,
+                    file_name="piezoelectricity_metadata.db",
+                    mime="application/octet-stream"
+                )
+        
+        # Download Universe DB
+        if os.path.exists(UNIVERSE_DB_FILE):
+            with open(UNIVERSE_DB_FILE, 'rb') as f:
+                st.download_button(
+                    label="Download Universe DB",
+                    data=f,
+                    file_name="piezoelectricity_universe.db",
+                    mime="application/octet-stream"
+                )
     
+    with col3:
+        # Download Log File
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, 'rb') as f:
+                st.download_button(
+                    label="Download Log File",
+                    data=f,
+                    file_name="piezoelectricity_query.log",
+                    mime="text/plain"
+                )
+    
+    # CSV and JSON downloads
     if "CSV" in output_formats:
         csv = df.drop(columns=["abstract_highlighted"]).to_csv(index=False)
         st.download_button(
@@ -548,6 +601,15 @@ if st.session_state.df is not None:
             file_name="piezoelectricity_papers.json",
             mime="application/json"
         )
+    
+    # Download All in one ZIP
+    all_zip_buffer = create_all_files_zip(relevant_papers, df, output_formats)
+    st.download_button(
+        label="Download All Files (ZIP)",
+        data=all_zip_buffer,
+        file_name="piezoelectricity_all_files.zip",
+        mime="application/zip"
+    )
     
     display_logs()
 else:
