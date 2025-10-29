@@ -215,7 +215,7 @@ def universe_insert(paper: dict):
     conn.commit()
     conn.close()
 
-def† save_metadata(df: pd.DataFrame):
+def save_metadata(df: pd.DataFrame):
     conn = sqlite3.connect(METADATA_DB)
     df.to_sql("papers", conn, if_exists="replace", index=False)
     conn.close()
