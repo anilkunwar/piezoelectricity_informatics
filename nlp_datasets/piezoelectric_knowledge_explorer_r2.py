@@ -27,7 +27,10 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 # ========================= MUST BE FIRST =========================
-st.set_page_config(page_title="Piezoelectricity in PVDF", layout="wide")
+# Guard against multiple calls (important for Streamlit Cloud)
+if "page_config_set" not in st.session_state:
+    st.set_page_config(page_title="Piezoelectricity in PVDF", layout="wide")
+    st.session_state.page_config_set = True
 # =================================================================
 
 # -------------------------- CONFIG --------------------------
@@ -208,6 +211,7 @@ def save_metadata(df: pd.DataFrame):
     df.to_sql("papers", conn, if_exists="replace", index=False)
     conn.commit()
     conn.close()
+    st.success(f"Metadata saved → `{METADATA_DB}`")
 
 # -------------------------- ARXIV QUERY --------------------------
 @st.cache_data(ttl=3600)
@@ -349,11 +353,19 @@ with st.sidebar:
 
     col_btn1, col_btn2 = st.columns(2)
     search_btn = col_btn1.button("Search arXiv", key="search_btn")
-    reset_btn = col_btn2.button("Reset", key="reset_btn")
+    reset_btn = col_btn2.button("Reset All", key="reset_btn")
+
+    if st.session_state.relevant_papers:
+        if st.button("Search Again", key="search_again"):
+            for k in ["search_results", "relevant_papers", "pdf_paths", "zip_path"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
 
 if reset_btn:
     for k in list(st.session_state.keys()):
-        del st.session_state[k]
+        if k != "page_config_set":
+            del st.session_state[k]
     st.success("Session cleared – reload the page")
     st.rerun()
 
@@ -365,7 +377,7 @@ if search_btn:
         st.stop()
     else:
         st.session_state.processing = True
-        with st.spinner("Querying arXiv…"):
+        with st.spinner("Querying arXiv + SciBERT scoring…"):
             all_papers = query_arxiv(q, cats, max_res, sy, ey)
 
         if not all_papers:
@@ -402,7 +414,6 @@ if search_btn:
                 # Save DB if requested
                 if "SQLite" in out_fmt:
                     save_metadata(pd.DataFrame(relevant).drop(columns=["content"], errors="ignore"))
-                    st.info("Metadata saved to DB")
         st.session_state.processing = False
 
 # -------------------------- DISPLAY RESULTS --------------------------
@@ -488,5 +499,5 @@ if st.session_state.relevant_papers:
                 key="db_uni"
             )
 
-# Always show logs (outside any conditional block)
+# Always show logs
 show_logs()
