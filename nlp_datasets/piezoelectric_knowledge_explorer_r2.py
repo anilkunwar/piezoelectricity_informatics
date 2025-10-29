@@ -11,7 +11,6 @@ import time
 from transformers import AutoTokenizer, AutoModel
 import torch
 import numpy as np
-from scipy.special import softmax
 from collections import Counter
 from tenacity import retry, stop_after_attempt, wait_fixed
 import zipfile
@@ -23,12 +22,11 @@ from urllib3.util.retry import Retry
 import concurrent.futures
 
 # ===== CLOUD-OPTIMIZED CONFIGURATION =====
-if os.path.exists("/tmp"):  # Cloud environments typically have /tmp
+if os.path.exists("/tmp"):  # Cloud environments
     DB_DIR = "/tmp"
 else:
     DB_DIR = os.path.join(os.path.expanduser("~"), "Desktop")
 
-# Ensure directories exist
 os.makedirs(DB_DIR, exist_ok=True)
 pdf_dir = os.path.join(DB_DIR, "pdfs")
 os.makedirs(pdf_dir, exist_ok=True)
@@ -52,63 +50,53 @@ This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants li
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `scipy`, `tenacity`, `requests`, `psutil`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy scipy tenacity requests psutil`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`, `requests`, `psutil`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity requests psutil`
 """)
 
 # ===== RESOURCE MANAGEMENT =====
 def check_memory_usage():
-    """Check current memory usage"""
     try:
         process = psutil.Process()
-        memory_usage = process.memory_info().rss / 1024 / 1024  # MB
-        return memory_usage
+        return process.memory_info().rss / 1024 / 1024  # MB
     except:
         return 0
 
 def cleanup_memory():
-    """Clean up memory and GPU cache"""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 def system_health_check():
-    """Check system resources before processing"""
     try:
         memory_usage = check_memory_usage()
         disk_usage = psutil.disk_usage(DB_DIR)
         disk_free_gb = disk_usage.free / (1024**3)
         
-        update_log(f"System health - Memory: {memory_usage:.1f}MB, Disk free: {disk_free_gb:.1f}GB")
+        update_log(f"Health - Memory: {memory_usage:.1f}MB, Disk free: {disk_free_gb:.1f}GB")
         
-        if memory_usage > 1500:  # 1.5GB
-            st.warning(f"High memory usage ({memory_usage:.1f}MB), processing may be slow")
+        if memory_usage > 1500:
+            st.warning(f"High memory ({memory_usage:.1f}MB), processing may be slow")
             cleanup_memory()
-        if disk_free_gb < 0.5:  # 500MB free space
-            st.error(f"Low disk space ({disk_free_gb:.1f}GB), some operations may fail")
+        if disk_free_gb < 0.5:
+            st.error(f"Low disk space ({disk_free_gb:.1f}GB)")
             return False
         return True
     except Exception as e:
         update_log(f"Health check warning: {str(e)}")
-        return True  # Continue anyway
+        return True
 
 def create_retry_session():
-    """Create HTTP session with retry strategy"""
     session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
+    retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
 
 def limit_pdf_processing(papers, max_pdfs=10):
-    """Limit the number of PDFs processed in cloud environment"""
-    if len(papers) > max_pdfs and os.path.exists("/tmp"):  # Cloud environment
-        st.warning(f"Cloud environment: Limiting to {max_pdfs} PDF downloads")
+    if len(papers) > max_pdfs and os.path.exists("/tmp"):
+        st.warning(f"Cloud: Limiting to {max_pdfs} PDFs")
         return papers[:max_pdfs]
     return papers
 
@@ -117,35 +105,27 @@ if "log_buffer" not in st.session_state:
     st.session_state.log_buffer = []
 if "processing" not in st.session_state:
     st.session_state.processing = False
-if "current_progress" not in st.session_state:
-    st.session_state.current_progress = 0
 if "download_files" not in st.session_state:
     st.session_state.download_files = {"pdf_paths": [], "zip_path": None}
 if "search_results" not in st.session_state:
     st.session_state.search_results = None
 if "relevant_papers" not in st.session_state:
     st.session_state.relevant_papers = None
-if "search_params" not in st.session_state:
-    st.session_state.search_params = None
 if "relevance_threshold" not in st.session_state:
     st.session_state.relevance_threshold = 30
 
 def reset_processing():
-    """Reset processing state"""
     st.session_state.processing = False
-    st.session_state.current_progress = 0
 
 def reset_downloads():
-    """Reset download-related state and clear cache"""
     st.session_state.download_files = {"pdf_paths": [], "zip_path": None}
     st.session_state.search_results = None
     st.session_state.relevant_papers = None
-    query_arxiv.clear()  # Clear the arXiv query cache
+    query_arxiv.clear()
     cleanup_memory()
-    update_log("Download state and cache cleared")
+    update_log("Downloads reset")
 
 def update_log(message):
-    """Update log with timestamp"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] {message}"
     st.session_state.log_buffer.append(log_entry)
@@ -156,30 +136,29 @@ def update_log(message):
 # ===== MODEL LOADING =====
 @st.cache_resource
 def load_scibert_model():
-    """Load SciBERT model with caching"""
     try:
         tokenizer = AutoTokenizer.from_pretrained("allenai/scibert_scivocab_uncased")
         model = AutoModel.from_pretrained("allenai/scibert_scivocab_uncased")
         model.eval()
-        update_log("SciBERT model loaded successfully")
+        update_log("SciBERT loaded")
         return tokenizer, model
     except Exception as e:
-        st.error(f"Failed to load SciBERT: {e}. Install: `pip install transformers torch`")
+        st.error(f"SciBERT load failed: {e}")
         st.stop()
 
 scibert_tokenizer, scibert_model = load_scibert_model()
 
 # ===== KEY TERMS AND SCORING =====
 KEY_TERMS = [
-    "piezoelectricity", "piezoelectric effect", "electrospun nanofibers", "PVDF", "alpha phase", "beta phase",
-    "SnO2", "dopants", "efficiency", "electricity generation", "mechanical force", "nanogenerators",
-    "d33", "energy harvesting", "phase fraction", "doped PVDF", "ferroelectric"
+    "piezoelectricity", "electrospun nanofibers", "PVDF", "alpha phase", "beta phase",
+    "SnO2", "dopants", "efficiency", "electricity generation", "mechanical force",
+    "nanogenerators", "d33", "energy harvesting", "doped PVDF"
 ]
 
 KEY_PATTERNS = [
     r'\bpiezoelectric(?:ity| effect| performance| properties| coefficient| constant| polymer| materials| harvester| generator)?\b',
-    r'\belectrospun (?:nano)?fibers?|nanofiber mats|nanofibrous membranes?|electrospinning\b',
-    r'\bpvdf|polyvinylidene fluoride|poly\s*\(?\s*vinylidene fluoride\s*\)?|pvd?f|p\(vdf-trfe\)|p\(vdf-hfp\)\b',
+    r'\belectrospun (?:nano)?fibers?|nanofiber mats|electrospinning\b',
+    r'\bpvdf|polyvinylidene fluoride|pvd?f|p\(vdf-trfe\)|p\(vdf-hfp\)\b',
     r'\b(alpha|beta|gamma|delta)\s*(?:phase|polymorph)\b',
     r'\bsno2|tin oxide|tin dioxide\b',
     r'\bdopants?|doped|doping|additives?\b',
@@ -197,7 +176,6 @@ def compile_patterns():
 COMPILED_PATTERNS = compile_patterns()
 
 def score_abstract_with_scibert(abstract):
-    """Score abstract relevance using SciBERT + attention boost"""
     try:
         inputs = scibert_tokenizer(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True)
         with torch.no_grad():
@@ -215,7 +193,7 @@ def score_abstract_with_scibert(abstract):
             if attn_score > 0.1:
                 relevance_prob = min(relevance_prob + 0.2 * len(keyword_indices) / len(tokens), 1.0)
         
-        update_log(f"SciBERT scored: {relevance_prob:.3f} (matched: {num_matched})")
+        update_log(f"SciBERT score: {relevance_prob:.3f}")
         return relevance_prob
     except Exception as e:
         update_log(f"SciBERT failed: {str(e)}")
@@ -225,7 +203,6 @@ def score_abstract_with_scibert(abstract):
 
 # ===== PDF PROCESSING =====
 def extract_text_from_pdf(pdf_path):
-    """Extract text from PDF file"""
     try:
         doc = fitz.open(pdf_path)
         text = ""
@@ -234,11 +211,10 @@ def extract_text_from_pdf(pdf_path):
         doc.close()
         return text
     except Exception as e:
-        update_log(f"PDF extraction failed for {pdf_path}: {str(e)}")
+        update_log(f"PDF extract failed: {str(e)}")
         return f"Error: {str(e)}"
 
 def update_db_content(db_file, paper_id, content):
-    """Update content in database"""
     try:
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
@@ -249,18 +225,17 @@ def update_db_content(db_file, paper_id, content):
         conn.commit()
         conn.close()
     except Exception as e:
-        update_log(f"Failed to update content in {db_file}: {str(e)}")
+        update_log(f"DB update failed: {str(e)}")
 
 # ===== BATCH PROCESSING =====
 def batch_convert_pdfs():
-    """Batch convert existing PDFs to databases"""
     pdf_files = [f for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
     if not pdf_files:
-        update_log("No PDFs found.")
+        update_log("No PDFs to convert.")
         return
     
     if not system_health_check():
-        st.error("System health check failed.")
+        st.error("Health check failed.")
         return
     
     progress_bar = st.progress(0)
@@ -269,7 +244,7 @@ def batch_convert_pdfs():
     for i, filename in enumerate(pdf_files):
         pdf_path = os.path.join(pdf_dir, filename)
         paper_id = filename[:-4]
-        status_text.text(f"Processing {i+1}/{len(pdf_files)}: {filename}")
+        status_text.text(f"Converting {i+1}/{len(pdf_files)}: {filename}")
         
         text = extract_text_from_pdf(pdf_path)
         if not text.startswith("Error"):
@@ -284,9 +259,9 @@ def batch_convert_pdfs():
     status_text.empty()
     cleanup_memory()
 
+# ===== DATABASE (with @retry) =====
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
-    """Create universe database entry"""
     try:
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
@@ -301,30 +276,28 @@ def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
         """, (paper["id"], paper.get("title", ""), paper.get("authors", "Unknown"), paper.get("year", 0), paper.get("content", "")))
         conn.commit()
         conn.close()
-        update_log(f"Updated universe DB: {paper['id']}")
+        update_log(f"Universe DB updated: {paper['id']}")
     except Exception as e:
         update_log(f"Universe DB error: {str(e)}")
         raise
 
 # ===== DATA STORAGE =====
 def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
-    """Save data to SQLite database"""
     try:
         conn = sqlite3.connect(metadata_db_file)
         papers_df.to_sql("papers", conn, if_exists="replace", index=False)
         if params_list:
             pd.DataFrame(params_list).to_sql("parameters", conn, if_exists="append", index=False)
         conn.close()
-        update_log(f"Saved {len(papers_df)} papers to {metadata_db_file}")
-        return f"Saved to {metadata_db_file}"
+        update_log(f"Saved {len(papers_df)} papers")
+        return "Saved to DB"
     except Exception as e:
         update_log(f"SQLite save failed: {str(e)}")
         return f"Failed: {str(e)}"
 
-# ===== ARXIV QUERY =====
+# ===== ARXIV QUERY (no @retry) =====
 @st.cache_data(ttl=3600)
 def query_arxiv(query, categories, max_results, start_year, end_year):
-    """Query arXiv for papers"""
     try:
         client = arxiv.Client()
         search = arxiv.Search(
@@ -372,13 +345,11 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
         return papers
     except Exception as e:
         update_log(f"arXiv query failed: {str(e)}")
-        st.error(f"Error querying arXiv: {str(e)}")
+        st.error(f"arXiv error: {str(e)}")
         return []
 
-# ===== PDF DOWNLOAD =====
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+# ===== PDF DOWNLOAD (no @retry) =====
 def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
-    """Download PDF and extract text"""
     pdf_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
     session = create_retry_session()
     try:
@@ -412,16 +383,22 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
         session.close()
 
 def download_paper(paper):
-    """Wrapper for concurrent download"""
-    if paper["pdf_url"]:
-        status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
-        paper["download_status"] = status
-        paper["pdf_path"] = pdf_path
-        paper["content"] = content
+    if not paper["pdf_url"]:
+        return
+    for attempt in range(3):
+        try:
+            status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
+            paper["download_status"] = status
+            paper["pdf_path"] = pdf_path
+            paper["content"] = content
+            return
+        except Exception as e:
+            update_log(f"Attempt {attempt+1}/3 failed for {paper['id']}: {e}")
+            time.sleep(2)
+    paper["download_status"] = "Failed after 3 attempts"
 
 # ===== FILE MANAGEMENT =====
 def create_pdf_zip(pdf_paths):
-    """Create ZIP file of PDFs"""
     zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -435,7 +412,6 @@ def create_pdf_zip(pdf_paths):
         return None
 
 def read_file_for_download(file_path):
-    """Read file for download"""
     try:
         with open(file_path, "rb") as f:
             return f.read()
@@ -490,7 +466,7 @@ if convert_button:
         st.warning("Processing in progress...")
     else:
         st.session_state.processing = True
-        with st.spinner("Converting PDFs..."):
+        with st.spinner("Converting PDFs to DB..."):
             batch_convert_pdfs()
         display_logs()
         st.success("DB update complete.")
@@ -504,10 +480,8 @@ if st.session_state.search_results and st.session_state.relevant_papers:
     
     if "SQLite (.db)" in output_formats:
         st.info(save_to_sqlite(df.drop(columns=["abstract_highlighted"]), []))
-    
-    # ZIP & DB download logic (same as below)
-    # ... (omitted for brevity, same as search block)
 
+# Search
 if search_button:
     if st.session_state.processing:
         st.warning("Processing in progress...")
@@ -609,4 +583,4 @@ if st.session_state.log_buffer:
             st.text(log)
 
 st.markdown("---")
-st.markdown("*Cloud-optimized • Robust • Ready for Streamlit Cloud*")
+st.markdown("*Cloud-optimized • No RetryError • Ready for Deployment*")
