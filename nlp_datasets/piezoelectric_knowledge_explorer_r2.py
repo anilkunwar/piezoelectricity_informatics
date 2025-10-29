@@ -16,16 +16,17 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 import zipfile
 import concurrent.futures
 import altair as alt
-import io
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import requests
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
 METADATA_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_metadata.db")
 UNIVERSE_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_universe.db")
-LOG_FILE = os.path.join(DB_DIR, 'piezoelectricity_query.log')
 
 # Initialize logging
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename=os.path.join(DB_DIR, 'piezoelectricity_query.log'), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Streamlit app
 st.set_page_config(page_title="Piezoelectricity in PVDF Query Tool", layout="wide")
@@ -38,8 +39,8 @@ This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants li
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`, `altair`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity altair`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`, `altair`, `requests`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity altair requests`
 """)
 
 # Cache the SciBERT model and tokenizer
@@ -302,6 +303,7 @@ def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
         raise
 
 # Save to SQLite
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
     try:
         initialize_db(metadata_db_file)
@@ -318,6 +320,7 @@ def save_to_sqlite(papers_df, params_list, metadata_db_file=METADATA_DB_FILE):
 
 # Query arXiv
 @st.cache_data
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def query_arxiv(query, categories, max_results, start_year, end_year):
     try:
         api_query = query  # Use the original query with phrases and OR
@@ -367,13 +370,20 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
         st.error(f"Error querying arXiv: {str(e)}. Try simplifying the query.")
         return []
 
-# Download PDF and extract text with caching
-@st.cache_data
+# Download PDF and extract text
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
     pdf_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
     try:
-        urllib.request.urlretrieve(pdf_url, pdf_path)
+        session = requests.Session()
+        retry = Retry(connect=3, backoff_factor=0.5)
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        response = session.get(pdf_url, timeout=10)
+        response.raise_for_status()
+        with open(pdf_path, 'wb') as f:
+            f.write(response.content)
         file_size = os.path.getsize(pdf_path) / 1024
         text = extract_text_from_pdf(pdf_path)
         if not text.startswith("Error"):
@@ -394,15 +404,6 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
         update_log(f"PDF download failed for {paper_id}: {str(e)}")
         return f"Failed: {str(e)}", None, f"Error: {str(e)}"
 
-# Function for concurrent download
-def download_paper(paper):
-    if paper["pdf_url"]:
-        status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
-        paper["download_status"] = status
-        paper["pdf_path"] = pdf_path
-        paper["content"] = content
-    update_log(f"Processed paper: {paper['title']}")
-
 # Create ZIP of PDFs with caching
 @st.cache_data
 def create_pdf_zip(pdf_paths_tuple):
@@ -418,39 +419,6 @@ def create_pdf_zip(pdf_paths_tuple):
     except Exception as e:
         update_log(f"ZIP creation failed: {str(e)}")
         return None
-
-# Create a comprehensive ZIP with all files
-def create_all_files_zip(relevant_papers, df, output_formats):
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w') as zipf:
-        # Add PDFs
-        for paper in relevant_papers:
-            pdf_path = paper.get('pdf_path')
-            if pdf_path and os.path.exists(pdf_path):
-                zipf.write(pdf_path, os.path.basename(pdf_path))
-        
-        # Add DB files
-        if os.path.exists(METADATA_DB_FILE):
-            zipf.write(METADATA_DB_FILE, os.path.basename(METADATA_DB_FILE))
-        if os.path.exists(UNIVERSE_DB_FILE):
-            zipf.write(UNIVERSE_DB_FILE, os.path.basename(UNIVERSE_DB_FILE))
-        
-        # Add log file
-        if os.path.exists(LOG_FILE):
-            zipf.write(LOG_FILE, os.path.basename(LOG_FILE))
-        
-        # Add CSV if selected
-        if "CSV" in output_formats:
-            csv_data = df.drop(columns=["abstract_highlighted"]).to_csv(index=False)
-            zipf.writestr("piezoelectricity_papers.csv", csv_data)
-        
-        # Add JSON if selected
-        if "JSON" in output_formats:
-            json_data = df.drop(columns=["abstract_highlighted"]).to_json(orient="records", lines=True)
-            zipf.writestr("piezoelectricity_papers.json", json_data)
-    
-    buffer.seek(0)
-    return buffer
 
 # Main Streamlit app
 st.header("arXiv Query for Piezoelectricity in Doped PVDF")
@@ -535,55 +503,36 @@ if st.session_state.df is not None:
     )
     st.altair_chart(chart, use_container_width=True)
     
-    st.subheader("Downloads")
-    col1, col2, col3 = st.columns(3)
+    # Create ZIP for download
+    zip_path = create_pdf_zip([p['pdf_path'] for p in relevant_papers])
+    if zip_path:
+        with open(zip_path, 'rb') as f:
+            st.download_button(
+                label="Download PDFs as ZIP",
+                data=f,
+                file_name="piezoelectricity_pdfs.zip",
+                mime="application/zip"
+            )
     
-    with col1:
-        # Create ZIP for PDFs
-        pdf_paths_tuple = tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path'])
-        zip_path = create_pdf_zip(pdf_paths_tuple)
-        if zip_path:
-            with open(zip_path, 'rb') as f:
-                st.download_button(
-                    label="Download PDFs as ZIP",
-                    data=f,
-                    file_name="piezoelectricity_pdfs.zip",
-                    mime="application/zip"
-                )
+    # Download DB files if exist
+    if os.path.exists(METADATA_DB_FILE):
+        with open(METADATA_DB_FILE, 'rb') as f:
+            st.download_button(
+                label="Download Metadata DB",
+                data=f,
+                file_name="piezoelectricity_metadata.db",
+                mime="application/octet-stream"
+            )
     
-    with col2:
-        # Download Metadata DB
-        if os.path.exists(METADATA_DB_FILE):
-            with open(METADATA_DB_FILE, 'rb') as f:
-                st.download_button(
-                    label="Download Metadata DB",
-                    data=f,
-                    file_name="piezoelectricity_metadata.db",
-                    mime="application/octet-stream"
-                )
-        
-        # Download Universe DB
-        if os.path.exists(UNIVERSE_DB_FILE):
-            with open(UNIVERSE_DB_FILE, 'rb') as f:
-                st.download_button(
-                    label="Download Universe DB",
-                    data=f,
-                    file_name="piezoelectricity_universe.db",
-                    mime="application/octet-stream"
-                )
+    if os.path.exists(UNIVERSE_DB_FILE):
+        with open(UNIVERSE_DB_FILE, 'rb') as f:
+            st.download_button(
+                label="Download Universe DB",
+                data=f,
+                file_name="piezoelectricity_universe.db",
+                mime="application/octet-stream"
+            )
     
-    with col3:
-        # Download Log File
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'rb') as f:
-                st.download_button(
-                    label="Download Log File",
-                    data=f,
-                    file_name="piezoelectricity_query.log",
-                    mime="text/plain"
-                )
-    
-    # CSV and JSON downloads
     if "CSV" in output_formats:
         csv = df.drop(columns=["abstract_highlighted"]).to_csv(index=False)
         st.download_button(
@@ -601,15 +550,6 @@ if st.session_state.df is not None:
             file_name="piezoelectricity_papers.json",
             mime="application/json"
         )
-    
-    # Download All in one ZIP
-    all_zip_buffer = create_all_files_zip(relevant_papers, df, output_formats)
-    st.download_button(
-        label="Download All Files (ZIP)",
-        data=all_zip_buffer,
-        file_name="piezoelectricity_all_files.zip",
-        mime="application/zip"
-    )
     
     display_logs()
 else:
