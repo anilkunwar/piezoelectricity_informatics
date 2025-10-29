@@ -334,7 +334,6 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
                 abstract_lower = result.summary.lower()
                 title_lower = result.title.lower()
                 matched_terms = [term for term in query_words if term in abstract_lower or term in title_lower]
-                # Removed the continue to include more papers, let scoring filter
                 relevance_prob = score_abstract_with_scibert(result.summary)
                 abstract_highlighted = result.summary
                 for term in matched_terms:
@@ -431,6 +430,7 @@ with st.sidebar:
     default_categories = ["cond-mat.mtrl-sci", "physics.app-ph", "physics.chem-ph"]
     categories = st.multiselect("Categories", default_categories, default=default_categories)
     max_results = st.slider("Max Papers", min_value=1, max_value=500, value=10)
+    relevance_threshold = st.slider("Relevance Threshold (%)", min_value=0, max_value=100, value=30)
     current_year = datetime.now().year
     col1, col2 = st.columns(2)
     with col1:
@@ -454,12 +454,12 @@ if search_button:
         if not papers:
             st.warning("No papers found. Broaden query or categories.")
         else:
-            st.success(f"Found **{len(papers)}** papers. Filtering for relevance > 30%...")
-            relevant_papers = [p for p in papers if p["relevance_prob"] > 30.0]
+            st.success(f"Found **{len(papers)}** papers. Filtering for relevance > {relevance_threshold}%...")
+            relevant_papers = [p for p in papers if p["relevance_prob"] > relevance_threshold]
             if not relevant_papers:
-                st.warning("No papers with relevance > 30%. Broaden query or check 'piezoelectricity_query.log'.")
+                st.warning(f"No papers with relevance > {relevance_threshold}%. Broaden query or check 'piezoelectricity_query.log'.")
             else:
-                st.success(f"**{len(relevant_papers)}** papers with relevance > 30%. Downloading PDFs...")
+                st.success(f"**{len(relevant_papers)}** papers with relevance > {relevance_threshold}%. Downloading PDFs...")
                 progress_bar = st.progress(0)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                     futures = [executor.submit(download_paper, paper) for paper in relevant_papers]
@@ -479,7 +479,7 @@ if search_button:
 if st.session_state.df is not None:
     df = st.session_state.df
     relevant_papers = st.session_state.relevant_papers
-    st.subheader("Papers (Relevance > 30%)")
+    st.subheader(f"Papers (Relevance > {relevance_threshold}%)")
     # Display dataframe with PDF links (arXiv cloud links)
     df_display = df[["id", "title", "year", "categories", "abstract_highlighted", "matched_terms", "relevance_prob", "download_status"]].copy()
     df_display["PDF Link"] = [f"[View PDF]({url})" for url in df["pdf_url"]]
