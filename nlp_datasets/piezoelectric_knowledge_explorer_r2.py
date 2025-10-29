@@ -376,16 +376,20 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
     pdf_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
     try:
         session = requests.Session()
-        retry = Retry(connect=3, backoff_factor=0.5)
+        retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry)
         session.mount('http://', adapter)
         session.mount('https://', adapter)
-        response = session.get(pdf_url, timeout=10)
+        
+        response = session.get(pdf_url, timeout=30)
         response.raise_for_status()
+        
         with open(pdf_path, 'wb') as f:
             f.write(response.content)
+            
         file_size = os.path.getsize(pdf_path) / 1024
         text = extract_text_from_pdf(pdf_path)
+        
         if not text.startswith("Error"):
             paper_data = {
                 "id": paper_id,
@@ -400,9 +404,21 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
         else:
             update_log(f"Text extraction failed for paper {paper_id}: {text}")
             return f"Failed: {text}", None, text
+            
     except Exception as e:
         update_log(f"PDF download failed for {paper_id}: {str(e)}")
         return f"Failed: {str(e)}", None, f"Error: {str(e)}"
+    finally:
+        session.close()
+
+# Function for concurrent download
+def download_paper(paper):
+    if paper["pdf_url"]:
+        status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
+        paper["download_status"] = status
+        paper["pdf_path"] = pdf_path
+        paper["content"] = content
+    update_log(f"Processed paper: {paper['title']}")
 
 # Create ZIP of PDFs with caching
 @st.cache_data
