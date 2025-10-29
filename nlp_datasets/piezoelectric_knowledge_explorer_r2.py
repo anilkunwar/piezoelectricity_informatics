@@ -15,6 +15,7 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
 import zipfile
 import concurrent.futures
+import altair as alt
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +36,8 @@ This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants li
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`, `altair`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity altair`
 """)
 
 # Cache the SciBERT model and tokenizer
@@ -487,6 +488,17 @@ if st.session_state.df is not None:
         df_display,
         use_container_width=True
     )
+    
+    # Relevance score visualization
+    st.subheader("Relevance Score Distribution")
+    chart = alt.Chart(df).mark_bar().encode(
+        alt.X("relevance_prob:Q", bin=True, title="Relevance Probability (%)"),
+        y='count()',
+        tooltip=['relevance_prob', 'count()']
+    ).properties(
+        width='container'
+    )
+    st.altair_chart(chart, use_container_width=True)
     
     # Create ZIP for download
     pdf_paths_tuple = tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path'])
