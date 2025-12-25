@@ -744,7 +744,7 @@ def download_manager():
     with col1:
         if st.session_state.downloaded_pdfs:
             zip_data = create_zip_of_downloaded_pdfs()
-            if zip_
+            if zip_data:  # ✅ FIXED: was 'if zip_'
                 st.download_button(
                     label="📦 All PDFs (ZIP)",
                     data=zip_data,
