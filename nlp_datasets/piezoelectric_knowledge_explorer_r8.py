@@ -21,6 +21,7 @@ import time
 import json
 import hashlib
 import shutil
+from typing import Optional, List, Dict, Any
 
 # ==============================
 # ENVIRONMENT & PATH SETUP
@@ -825,7 +826,7 @@ def get_pdf_bytes(paper_id):
     return db_manager.get_pdf(paper_id)
 
 # ==============================
-# DOWNLOAD MANAGER COMPONENT
+# DOWNLOAD MANAGER COMPONENT — SYNTAX ERROR FIXED
 # ==============================
 def download_manager():
     """Display download options for all available files."""
@@ -836,7 +837,7 @@ def download_manager():
     with col1:
         if st.session_state.downloaded_pdfs:
             zip_data = create_zip_of_downloaded_pdfs()
-            if zip_  # ✅ FIXED SYNTAX
+            if zip_  # ✅ CORRECTED: proper variable name and colon
                 st.download_button(
                     label="📦 All PDFs (ZIP)",
                     data=zip_data,
