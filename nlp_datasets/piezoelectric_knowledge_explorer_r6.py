@@ -684,7 +684,7 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1: start_year = st.number_input("Start Year", 1990, current_year, 2010)
     with col2: end_year = st.number_input("End Year", start_year, current_year, current_year)
-    max_results = st.slider("Maximum Results", 1, 100, 20)
+    max_results = st.slider("Maximum Results", 1, 500, 50)
     relevance_threshold = st.slider("Relevance Threshold (%)", 0, 100, 30)
 
     st.subheader("💾 Storage Options")
