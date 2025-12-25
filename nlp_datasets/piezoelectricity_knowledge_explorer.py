@@ -2,7 +2,6 @@ import arxiv
 import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
-import urllib.request
 import os
 import re
 import sqlite3
@@ -12,9 +11,22 @@ import time
 from transformers import AutoTokenizer, AutoModel
 import torch
 import numpy as np
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_exponential
 import zipfile
-import concurrent.futures
+import tempfile
+import requests
+from pathlib import Path
+
+# --- Environment Detection ---
+def is_streamlit_cloud():
+    """Detect if running on Streamlit Cloud."""
+    return (
+        os.getenv("HOME") == "/home/appuser" or
+        "streamlitapp.com" in os.getenv("HOSTNAME", "") or
+        os.getenv("IS_STREAMLIT_CLOUD", "false").lower() == "true"
+    )
+
+IS_CLOUD = is_streamlit_cloud()
 
 # Define database directory and files
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,21 +34,26 @@ METADATA_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_metadata.db")
 UNIVERSE_DB_FILE = os.path.join(DB_DIR, "piezoelectricity_universe.db")
 
 # Initialize logging
-logging.basicConfig(filename=os.path.join(DB_DIR, 'piezoelectricity_query.log'), level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log_file = os.path.join(DB_DIR, 'piezoelectricity_query.log')
+os.makedirs(DB_DIR, exist_ok=True)
+logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Streamlit app
 st.set_page_config(page_title="Piezoelectricity in PVDF Query Tool", layout="wide")
 st.title("Piezoelectricity in PVDF Query Tool with SciBERT")
 st.markdown("""
-This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants like SnO2**, focusing on **alpha and beta phase fractions**, **electrospun nanofibers**, **efficiency**, **electricity generation**, **mechanical force**, and related factors for piezoelectric studies. It uses SciBERT with attention mechanism to prioritize relevant abstracts (>30% relevance) and stores metadata in `piezoelectricity_metadata.db` and full PDF text in `piezoelectricity_universe.db` for fallback searches.
+This tool queries arXiv for papers on **piezoelectricity in PVDF with dopants like SnO₂**, focusing on **alpha and beta phase fractions**, **electrospun nanofibers**, **efficiency**, **electricity generation**, **mechanical force**, and related factors for piezoelectric studies. It uses SciBERT with attention mechanism to prioritize relevant abstracts (>30% relevance) and stores metadata in `piezoelectricity_metadata.db` and full PDF text in `piezoelectricity_universe.db` for fallback searches.
 """)
+
+if IS_CLOUD:
+    st.warning("🟢 Running on **Streamlit Cloud**: Auto-PDF download disabled to respect arXiv policies. Use 'Download PDF' buttons individually.")
 
 # Dependency check
 st.sidebar.header("Setup")
 st.sidebar.markdown("""
 **Dependencies**:
-- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`
-- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity`
+- `arxiv`, `pymupdf`, `pandas`, `streamlit`, `transformers`, `torch`, `numpy`, `tenacity`, `requests`
+- Install: `pip install arxiv pymupdf pandas streamlit transformers torch numpy tenacity requests`
 """)
 
 # Cache the SciBERT model and tokenizer
@@ -53,15 +70,15 @@ except Exception as e:
     st.error(f"Failed to load SciBERT: {e}. Install: `pip install transformers torch`")
     st.stop()
 
-# Create PDFs directory
-pdf_dir = os.path.join(DB_DIR, "pdfs")
-if not os.path.exists(pdf_dir):
-    os.makedirs(pdf_dir)
-    st.info(f"Created directory: {pdf_dir}")
-
-# Initialize session state for logs
+# Initialize session state
 if "log_buffer" not in st.session_state:
     st.session_state.log_buffer = []
+if "downloaded_pdfs" not in st.session_state:
+    st.session_state.downloaded_pdfs = {}  # {paper_id: {pdf_bytes, content, ...}}
+if "temp_dir" not in st.session_state:
+    st.session_state.temp_dir = tempfile.mkdtemp()
+pdf_dir = Path(st.session_state.temp_dir) / "pdfs"
+pdf_dir.mkdir(exist_ok=True)
 
 def update_log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -175,7 +192,7 @@ def score_abstract_with_scibert(abstract):
         
         # Use attention to boost if keywords present
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-        keyword_indices = [i for i, token in enumerate(tokens) if any(kw in token.lower() for kw in ['pvdf', 'piezo', 'phase', 'beta', 'alpha'])]  # Simplified keyword check for attention
+        keyword_indices = [i for i, token in enumerate(tokens) if any(kw in token.lower() for kw in ['pvdf', 'piezo', 'phase', 'beta', 'alpha'])]
         if keyword_indices:
             attentions = outputs.attentions[-1][0, 0].numpy()  # Last layer, first head
             attn_score = np.sum(attentions[keyword_indices, :]) / len(keyword_indices)
@@ -254,7 +271,7 @@ def initialize_db(db_file):
         st.error(f"Failed to initialize {db_file}: {str(e)}")
 
 # Create piezoelectricity_universe.db incrementally
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def create_universe_db(paper, db_file=UNIVERSE_DB_FILE):
     try:
         conn = get_db_connection(db_file)
@@ -353,16 +370,44 @@ def query_arxiv(query, categories, max_results, start_year, end_year):
         st.error(f"Error querying arXiv: {str(e)}. Try simplifying the query.")
         return []
 
-# Download PDF and extract text with caching
-@st.cache_data
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
-    pdf_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
+# --- PDF DOWNLOADING (FIXED & SAFE) ---
+def download_pdf_bytes(pdf_url):
+    """Download PDF as bytes with proper headers."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Piezoelectricity Research Tool; Academic Use) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    }
+    response = requests.get(pdf_url, headers=headers, timeout=30)
+    response.raise_for_status()
+    return response.content
+
+def extract_text_from_bytes(pdf_bytes):
     try:
-        urllib.request.urlretrieve(pdf_url, pdf_path)
-        file_size = os.path.getsize(pdf_path) / 1024
-        text = extract_text_from_pdf(pdf_path)
-        if not text.startswith("Error"):
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        doc.close()
+        return text
+    except Exception as e:
+        return f"Text extraction error: {str(e)}"
+
+# Manual PDF download per paper using session state
+def handle_pdf_download(paper_id, pdf_url, paper_metadata):
+    try:
+        pdf_bytes = download_pdf_bytes(pdf_url)
+        text = extract_text_from_bytes(pdf_bytes)
+        
+        # Save to session state
+        st.session_state.downloaded_pdfs[paper_id] = {
+            "pdf_bytes": pdf_bytes,
+            "content": text,
+            "title": paper_metadata.get("title", ""),
+            "authors": paper_metadata.get("authors", "Unknown"),
+            "year": paper_metadata.get("year", 0)
+        }
+        
+        # Optionally update universe DB (local only)
+        if not IS_CLOUD:
             paper_data = {
                 "id": paper_id,
                 "title": paper_metadata.get("title", ""),
@@ -371,42 +416,28 @@ def download_pdf_and_extract(pdf_url, paper_id, paper_metadata):
                 "content": text
             }
             create_universe_db(paper_data)
-            update_log(f"Downloaded and extracted text for paper {paper_id} ({file_size:.2f} KB)")
-            return f"Downloaded ({file_size:.2f} KB)", pdf_path, text
-        else:
-            update_log(f"Text extraction failed for paper {paper_id}: {text}")
-            return f"Failed: {text}", None, text
+        
+        update_log(f"✅ PDF downloaded for {paper_id}")
+        return True
     except Exception as e:
-        update_log(f"PDF download failed for {paper_id}: {str(e)}")
-        return f"Failed: {str(e)}", None, f"Error: {str(e)}"
+        error_msg = f"❌ Failed to download {paper_id}: {str(e)}"
+        update_log(error_msg)
+        st.error(error_msg)
+        return False
 
-# Function for concurrent download
-def download_paper(paper):
-    if paper["pdf_url"]:
-        status, pdf_path, content = download_pdf_and_extract(paper["pdf_url"], paper["id"], paper)
-        paper["download_status"] = status
-        paper["pdf_path"] = pdf_path
-        paper["content"] = content
-    update_log(f"Processed paper: {paper['title']}")
-
-# Create ZIP of PDFs with caching
-@st.cache_data
-def create_pdf_zip(pdf_paths):
-    zip_path = os.path.join(DB_DIR, "piezoelectricity_pdfs.zip")
-    try:
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for pdf in pdf_paths:
-                if pdf and os.path.exists(pdf):
-                    zipf.write(pdf, os.path.basename(pdf))
-        update_log(f"Created ZIP file: {zip_path}")
-        return zip_path
-    except Exception as e:
-        update_log(f"ZIP creation failed: {str(e)}")
+# Create ZIP of PDFs
+def create_pdf_zip():
+    if not st.session_state.downloaded_pdfs:
         return None
+    zip_path = Path(st.session_state.temp_dir) / "piezoelectricity_pdfs.zip"
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for pid, data in st.session_state.downloaded_pdfs.items():
+            zipf.writestr(f"{pid}.pdf", data["pdf_bytes"])
+    return zip_path
 
 # Main Streamlit app
 st.header("arXiv Query for Piezoelectricity in Doped PVDF")
-st.markdown("Search for abstracts on **piezoelectricity**, **electrospun nanofibers**, **PVDF**, **alpha/beta phases**, **SnO2 dopants**, **efficiency**, **electricity generation**, **mechanical force** using SciBERT with attention mechanism.")
+st.markdown("Search for abstracts on **piezoelectricity**, **electrospun nanofibers**, **PVDF**, **alpha/beta phases**, **SnO₂ dopants**, **efficiency**, **electricity generation**, **mechanical force** using SciBERT with attention mechanism.")
 
 log_container = st.empty()
 def display_logs():
@@ -446,36 +477,44 @@ if search_button:
             if not relevant_papers:
                 st.warning("No papers with relevance > 30%. Broaden query or check 'piezoelectricity_query.log'.")
             else:
-                st.success(f"**{len(relevant_papers)}** papers with relevance > 30%. Downloading PDFs...")
-                progress_bar = st.progress(0)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                    futures = [executor.submit(download_paper, paper) for paper in relevant_papers]
-                    for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                        future.result()
-                        progress_bar.progress((i + 1) / len(relevant_papers))
-                        time.sleep(0.5)  # Reduced delay to avoid rate-limiting while allowing some breathing room
-                
+                st.success(f"**{len(relevant_papers)}** papers with relevance > 30%.")
                 df = pd.DataFrame(relevant_papers)
-                st.subheader("Papers (Relevance > 30%)")
-                # Display dataframe with PDF links (arXiv cloud links)
-                df_display = df[["id", "title", "year", "categories", "abstract_highlighted", "matched_terms", "relevance_prob", "download_status"]].copy()
-                df_display["PDF Link"] = [f"[View PDF]({url})" for url in df["pdf_url"]]
-                st.dataframe(
-                    df_display,
-                    use_container_width=True
-                )
+
+                # Display papers with manual download buttons
+                for idx, paper in df.iterrows():
+                    with st.expander(f"📄 {paper['title']} ({paper['year']}) - Relevance: {paper['relevance_prob']}%"):
+                        st.markdown(f"**Authors**: {paper['authors']}")
+                        st.markdown(f"**Categories**: {paper['categories']}")
+                        st.markdown(f"**Matched Terms**: {paper['matched_terms']}")
+                        st.markdown(paper['abstract_highlighted'], unsafe_allow_html=True)
+                        
+                        col1, col2 = st.columns([1, 4])
+                        with col1:
+                            if st.button(f"📥 Download PDF", key=f"btn_{paper['id']}"):
+                                with st.spinner("Downloading..."):
+                                    success = handle_pdf_download(
+                                        paper["id"], paper["pdf_url"], paper.to_dict()
+                                    )
+                                    if success:
+                                        st.success("Downloaded! Scroll down for ZIP.")
+                        
+                        with col2:
+                            abs_url = paper['pdf_url'].replace('/pdf/', '/abs/')
+                            st.markdown(f"[🌐 View on arXiv]({abs_url}) | [📄 View PDF]({paper['pdf_url']})")
                 
-                # Create ZIP for download
-                zip_path = create_pdf_zip(tuple(p['pdf_path'] for p in relevant_papers if p['pdf_path']))  # Use tuple for hashable cache key
-                if zip_path:
-                    with open(zip_path, 'rb') as f:
-                        st.download_button(
-                            label="Download PDFs as ZIP",
-                            data=f,
-                            file_name="piezoelectricity_pdfs.zip",
-                            mime="application/zip"
-                        )
+                # ZIP all downloaded PDFs
+                if st.session_state.downloaded_pdfs:
+                    zip_path = create_pdf_zip()
+                    if zip_path:
+                        with open(zip_path, "rb") as f:
+                            st.download_button(
+                                label="📦 Download All Downloaded PDFs as ZIP",
+                                data=f,
+                                file_name="piezoelectricity_pdfs.zip",
+                                mime="application/zip"
+                            )
                 
+                # Save metadata in selected formats
                 if "SQLite (.db)" in output_formats:
                     sqlite_status = save_to_sqlite(df.drop(columns=["abstract_highlighted"]), [])
                     st.info(sqlite_status)
@@ -483,16 +522,16 @@ if search_button:
                 if "CSV" in output_formats:
                     csv = df.drop(columns=["abstract_highlighted"]).to_csv(index=False)
                     st.download_button(
-                        label="Download Paper Metadata CSV",
+                        label="📥 Download Paper Metadata (CSV)",
                         data=csv,
                         file_name="piezoelectricity_papers.csv",
                         mime="text/csv"
                     )
                 
                 if "JSON" in output_formats:
-                    json_data = df.drop(columns=["abstract_highlighted"]).to_json(orient="records", lines=True)
+                    json_data = df.drop(columns=["abstract_highlighted"]).to_json(orient="records")
                     st.download_button(
-                        label="Download Paper Metadata JSON",
+                        label="📥 Download Paper Metadata (JSON)",
                         data=json_data,
                         file_name="piezoelectricity_papers.json",
                         mime="application/json"
