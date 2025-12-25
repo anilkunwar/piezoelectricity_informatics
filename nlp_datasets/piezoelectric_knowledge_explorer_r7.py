@@ -19,6 +19,7 @@ import base64
 from streamlit.components.v1 import html
 import time
 import json
+import shutil
 
 # ==============================
 # ENVIRONMENT & PATH SETUP
@@ -34,14 +35,15 @@ def is_streamlit_cloud():
 IS_CLOUD = is_streamlit_cloud()
 
 # Use a guaranteed-writable temporary directory
-BASE_DIR = Path(tempfile.gettempdir())
+BASE_DIR = Path(tempfile.gettempdir()) / "piezoelectricity_app"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+
 METADATA_DB_FILE = BASE_DIR / "piezoelectricity_metadata.db"
 UNIVERSE_DB_FILE = BASE_DIR / "piezoelectricity_universe.db"
 LOG_FILE = BASE_DIR / "piezoelectricity_query.log"
 SESSION_STATE_FILE = BASE_DIR / "piezoelectricity_session.json"
-
-# Ensure the base directory exists
-BASE_DIR.mkdir(exist_ok=True)
+PDF_STORAGE_DIR = BASE_DIR / "pdfs"
+PDF_STORAGE_DIR.mkdir(exist_ok=True)
 
 # Set up logging
 logging.basicConfig(
@@ -181,22 +183,13 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # ==============================
-# SESSION STATE PERSISTENCE UTILITIES — FIXED FOR BINARY DATA
+# SESSION STATE PERSISTENCE UTILITIES — STORES ONLY IDS, NOT BYTES
 # ==============================
 def save_session_state():
-    """Save critical session state to disk, encoding PDF bytes as base64."""
+    """Save critical session state to disk — only paper IDs, not PDF bytes."""
     try:
-        # Encode PDF bytes to base64 strings for JSON serialization
-        downloaded_pdfs_b64 = {}
-        for paper_id, pdf_bytes in st.session_state.get('downloaded_pdfs', {}).items():
-            if isinstance(pdf_bytes, bytes):
-                downloaded_pdfs_b64[paper_id] = base64.b64encode(pdf_bytes).decode('utf-8')
-            else:
-                # In case of unexpected type, skip
-                logging.warning(f"Skipping non-bytes PDF for {paper_id}")
-        
         session_data = {
-            'downloaded_pdfs_b64': downloaded_pdfs_b64,
+            'downloaded_pdfs_list': st.session_state.get('downloaded_pdfs', []),
             'log_buffer': st.session_state.get('log_buffer', []),
             'papers_df': st.session_state.get('papers_df', None),
             'search_performed': st.session_state.get('search_performed', False),
@@ -204,39 +197,28 @@ def save_session_state():
             'last_update': datetime.now().isoformat()
         }
         
-        # Convert DataFrames to dict for JSON serialization
         if session_data['papers_df'] is not None:
             session_data['papers_df'] = session_data['papers_df'].to_dict()
             
         with open(SESSION_STATE_FILE, 'w') as f:
             json.dump(session_data, f)
             
-        logging.info(f"Session state saved: {len(downloaded_pdfs_b64)} PDFs, {len(session_data['log_buffer'])} logs")
+        logging.info(f"Session state saved: {len(session_data['downloaded_pdfs_list'])} PDFs, {len(session_data['log_buffer'])} logs")
     except Exception as e:
         logging.error(f"Error saving session state: {e}")
 
 def load_session_state():
-    """Load session state from disk after crash/restart, decoding base64 PDFs."""
+    """Load session state from disk after crash/restart."""
     try:
         if SESSION_STATE_FILE.exists():
             with open(SESSION_STATE_FILE, 'r') as f:
                 session_data = json.load(f)
             
-            # Decode base64 PDFs back to bytes
-            downloaded_pdfs = {}
-            for paper_id, b64_str in session_data.get('downloaded_pdfs_b64', {}).items():
-                try:
-                    pdf_bytes = base64.b64decode(b64_str)
-                    downloaded_pdfs[paper_id] = pdf_bytes
-                except Exception as e:
-                    logging.warning(f"Failed to decode PDF {paper_id}: {e}")
-            
-            st.session_state.downloaded_pdfs = downloaded_pdfs
+            st.session_state.downloaded_pdfs = session_data.get('downloaded_pdfs_list', [])
             st.session_state.log_buffer = session_data.get('log_buffer', [])
             st.session_state.search_performed = session_data.get('search_performed', False)
             st.session_state.universe_db_updated = session_data.get('universe_db_updated', False)
             
-            # Convert dict back to DataFrame
             if session_data.get('papers_df'):
                 st.session_state.papers_df = pd.DataFrame(session_data['papers_df'])
             
@@ -247,7 +229,7 @@ def load_session_state():
     return False
 
 def clear_session_state():
-    """Clear session state and remove session file."""
+    """Clear session state and remove session file (keeps PDFs for download)."""
     st.session_state.clear()
     if SESSION_STATE_FILE.exists():
         SESSION_STATE_FILE.unlink()
@@ -264,7 +246,6 @@ def update_log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     full_msg = f"[{timestamp}] {message}"
     
-    # Ensure log buffer exists
     if 'log_buffer' not in st.session_state:
         st.session_state.log_buffer = []
     
@@ -274,7 +255,6 @@ def update_log(message):
     
     logging.info(message)
     
-    # Auto-save with protection
     try:
         if st.session_state.get('auto_save', True):
             save_session_state()
@@ -322,7 +302,7 @@ st.markdown("""
         <li><strong>Full extracted text</strong> in <code>piezoelectricity_universe.db</code></li>
     </ul>
     <div style="background: linear-gradient(135deg, #DCFCE7 0%, #BBF7D0 100%); padding: 1rem; border-radius: 8px; border-left: 4px solid #10B981;">
-        <strong>🔒 Session Persistence:</strong> Your downloaded PDFs and search results are preserved across app restarts.
+        <strong>✅ Crash-Resistant Design:</strong> PDFs stored on disk, not in memory.
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -339,14 +319,11 @@ if IS_CLOUD:
 if "initialized" not in st.session_state:
     st.session_state.log_buffer = []
     
-    # Attempt to restore previous session
     if not load_session_state():
-        # Fresh session
-        st.session_state.downloaded_pdfs = {}
+        st.session_state.downloaded_pdfs = []
         st.session_state.papers_df = None
         st.session_state.search_performed = False
         st.session_state.universe_db_updated = False
-        st.session_state.download_queued = {}
         st.session_state.auto_save = True
         update_log("Intialized new session (no prior state)")
     else:
@@ -637,30 +614,54 @@ def query_arxiv_api(query, categories, max_results, start_year, end_year):
         return []
 
 # ==============================
-# PDF DOWNLOAD AND PROCESSING
+# PDF DOWNLOAD AND PROCESSING — CRASH-RESISTANT
 # ==============================
-def download_pdf_bytes(pdf_url):
-    """Download a PDF as bytes with proper headers."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; Piezoelectricity Research Tool/1.0)'
-    }
-    response = requests.get(pdf_url, headers=headers, timeout=30)
-    response.raise_for_status()
-    return response.content
-
-def handle_pdf_download(paper_id, pdf_url, paper_metadata):
-    """Download a PDF, extract text, and update databases."""
+def download_pdf_to_disk(paper_id, pdf_url):
+    """Download PDF to disk and return path."""
+    pdf_path = PDF_STORAGE_DIR / f"{paper_id}.pdf"
     try:
-        pdf_bytes = download_pdf_bytes(pdf_url)
-        st.session_state.downloaded_pdfs[paper_id] = pdf_bytes
-        update_log(f"Downloaded PDF for {paper_id} ({len(pdf_bytes)} bytes)")
-        
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; Piezoelectricity Research Tool/1.0)'
+        }
+        response = requests.get(pdf_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        with open(pdf_path, 'wb') as f:
+            f.write(response.content)
+        update_log(f"Downloaded PDF for {paper_id} to {pdf_path}")
+        return pdf_path
+    except Exception as e:
+        update_log(f"PDF download failed for {paper_id}: {str(e)}")
+        return None
+
+def extract_text_from_pdf(pdf_path):
+    """Safely extract text from PDF; return empty string on failure."""
+    try:
+        doc = fitz.open(pdf_path)
         full_text = ""
         for page in doc:
-            full_text += page.get_text()
+            try:
+                text = page.get_text()
+                full_text += text
+            except Exception:
+                continue
         doc.close()
-        update_log(f"Extracted {len(full_text)} characters from {paper_id}")
+        return full_text
+    except Exception as e:
+        update_log(f"Text extraction failed for {pdf_path}: {str(e)}")
+        return ""
+
+def handle_pdf_download(paper_id, pdf_url, paper_metadata):
+    """Download PDF to disk and index text — no memory bloat."""
+    try:
+        pdf_path = download_pdf_to_disk(paper_id, pdf_url)
+        if not pdf_path or not pdf_path.exists():
+            st.error("❌ PDF download failed.")
+            return False
+        
+        full_text = extract_text_from_pdf(pdf_path)
+        if not full_text.strip():
+            st.warning("⚠️ PDF appears to be scanned/image-only. Text extraction skipped.")
+            full_text = "[No extractable text — likely a scanned document.]"
         
         init_universe_db()
         conn = sqlite3.connect(UNIVERSE_DB_FILE)
@@ -685,27 +686,32 @@ def handle_pdf_download(paper_id, pdf_url, paper_metadata):
         conn.commit()
         conn.close()
         
+        if paper_id not in st.session_state.downloaded_pdfs:
+            st.session_state.downloaded_pdfs.append(paper_id)
         st.session_state.universe_db_updated = True
         save_session_state()
         update_log(f"Updated databases with {paper_id}")
         return True
     except Exception as e:
-        error_msg = f"PDF download/extraction failed for {paper_id}: {str(e)}"
+        error_msg = f"PDF processing failed for {paper_id}: {str(e)}"
         update_log(error_msg)
+        st.error(f"❌ {error_msg}")
         return False
 
 # ==============================
-# FILE CREATION UTILITIES
+# FILE CREATION UTILITIES — READ FROM DISK
 # ==============================
 def create_zip_of_downloaded_pdfs():
-    """Create a ZIP file of all downloaded PDFs in memory."""
+    """Create a ZIP file of all downloaded PDFs from disk."""
     if not st.session_state.downloaded_pdfs:
         return None
     
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for paper_id, pdf_bytes in st.session_state.downloaded_pdfs.items():
-            zipf.writestr(f"{paper_id}.pdf", pdf_bytes)
+        for paper_id in st.session_state.downloaded_pdfs:
+            pdf_path = PDF_STORAGE_DIR / f"{paper_id}.pdf"
+            if pdf_path.exists():
+                zipf.write(pdf_path, f"{paper_id}.pdf")
     
     zip_buffer.seek(0)
     update_log(f"Created ZIP with {len(st.session_state.downloaded_pdfs)} PDFs")
@@ -717,6 +723,14 @@ def get_db_as_bytes(db_path):
         return None
     with open(db_path, "rb") as f:
         return f.read()
+
+def get_pdf_bytes(paper_id):
+    """Read individual PDF from disk as bytes."""
+    pdf_path = PDF_STORAGE_DIR / f"{paper_id}.pdf"
+    if pdf_path.exists():
+        with open(pdf_path, "rb") as f:
+            return f.read()
+    return None
 
 # ==============================
 # DOWNLOAD MANAGER COMPONENT
@@ -730,7 +744,7 @@ def download_manager():
     with col1:
         if st.session_state.downloaded_pdfs:
             zip_data = create_zip_of_downloaded_pdfs()
-            if zip_data:
+            if zip_
                 st.download_button(
                     label="📦 All PDFs (ZIP)",
                     data=zip_data,
@@ -963,10 +977,10 @@ if search_button:
                         col_dl, col_view, col_save = st.columns(3)
                         with col_dl:
                             if st.button("📥 Download & Index", key=f"dl_{paper['id']}", use_container_width=True):
-                                with st.spinner("Downloading..."):
+                                with st.spinner("Downloading and indexing PDF..."):
                                     success = handle_pdf_download(paper["id"], paper["pdf_url"], paper)
                                     if success:
-                                        st.success("✅ Downloaded!")
+                                        st.success("✅ Downloaded and indexed!")
                                         st.rerun()
                         
                         with col_view:
@@ -975,14 +989,18 @@ if search_button:
                         
                         with col_save:
                             if paper["id"] in st.session_state.downloaded_pdfs:
-                                st.download_button(
-                                    "💾 Save PDF",
-                                    data=st.session_state.downloaded_pdfs[paper["id"]],
-                                    file_name=f"{paper['id']}.pdf",
-                                    mime="application/pdf",
-                                    key=f"save_{paper['id']}",
-                                    use_container_width=True
-                                )
+                                pdf_bytes = get_pdf_bytes(paper["id"])
+                                if pdf_bytes:
+                                    st.download_button(
+                                        "💾 Save PDF",
+                                        data=pdf_bytes,
+                                        file_name=f"{paper['id']}.pdf",
+                                        mime="application/pdf",
+                                        key=f"save_{paper['id']}",
+                                        use_container_width=True
+                                    )
+                                else:
+                                    st.button("💾 PDF Not Found", disabled=True, use_container_width=True)
 
 # ==============================
 # DOWNLOAD AND INSPECTION SECTION
