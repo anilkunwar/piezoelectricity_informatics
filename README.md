@@ -15,3 +15,9 @@ Text based data extraction from web using attention mechanism
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction6-streamlit-red)](https://piezoelectricity-knowledge-explorer6.streamlit.app/) (Type B)
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction7-streamlit-red)](https://piezoelectricity-knowledge-explorer7.streamlit.app/)  (Type A)
+
+
+# Data Visualization and Quantitative NER
+
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner1-streamlit-red)](https://piezoelectricity-wordgraph-ner1.streamlit.app/)
