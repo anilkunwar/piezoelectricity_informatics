@@ -945,9 +945,9 @@ class PublicationQualityVisualizationEngine:
                         ))
         return fig
 
-    def create_radar_chart(self, material_ Dict, title: str = "Material Property Comparison"):
+    def create_radar_chart(self, material_data: Dict, title: str = "Material Property Comparison"):
         """Create radar chart for material comparison"""
-        if not material_
+        if not material_data:
             return None
 
         categories = list(material_data.keys())
