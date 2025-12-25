@@ -1,8 +1,8 @@
 # --------------------------------------------------------------
-#  Piezoelectricity in PVDF – FINAL, PRODUCTION-READY with SQLite PDF Storage
+#  Piezoelectricity in PVDF – ENHANCED with Reliable PDF Storage
 # --------------------------------------------------------------
 import arxiv
-import fitz
+import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
 import os
@@ -14,13 +14,14 @@ import time
 import random
 from pathlib import Path
 import zipfile
+import io
 import gc
 import psutil
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-import io
+import tempfile
 import hashlib
 import json
 from typing import List, Dict, Any, Optional, Tuple, BinaryIO
@@ -28,17 +29,18 @@ from typing import List, Dict, Any, Optional, Tuple, BinaryIO
 from transformers import AutoTokenizer, AutoModel
 import torch
 import numpy as np
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential
 
-# ========================= Numba JIT =========================
-try:
-    from numba import jit, njit, prange, objmode
-    from numba.typed import List as NumbaList
-    import numba
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-    st.warning("Numba not installed. Install with: pip install numba")
+# ========================= ENVIRONMENT DETECTION =========================
+def is_streamlit_cloud():
+    """Detect if running on Streamlit Cloud."""
+    return (
+        os.getenv("HOME") == "/home/appuser" or
+        "streamlitapp.com" in os.getenv("HOSTNAME", "") or
+        os.getenv("IS_STREAMLIT_CLOUD", "false").lower() == "true"
+    )
+
+IS_CLOUD = is_streamlit_cloud()
 
 # ========================= MUST BE FIRST =========================
 if "page_config_set" not in st.session_state:
@@ -47,18 +49,30 @@ if "page_config_set" not in st.session_state:
 # =================================================================
 
 # -------------------------- CONFIG --------------------------
-DB_DIR = "/tmp" if os.path.exists("/tmp") else os.path.join(os.path.expanduser("~"), "Desktop")
+# Determine storage directory
+if IS_CLOUD:
+    DB_DIR = "/tmp"  # Use /tmp on Streamlit Cloud
+    st.info("🌐 Running on Streamlit Cloud: Using temporary storage")
+else:
+    DB_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "piezoelectricity_data")
+
 os.makedirs(DB_DIR, exist_ok=True)
 
-# No longer need PDF directory since we're storing in SQLite
+# Database files
 METADATA_DB = os.path.join(DB_DIR, "piezoelectricity_metadata.db")
 UNIVERSE_DB = os.path.join(DB_DIR, "piezoelectricity_universe.db")
-PDF_STORAGE_DB = os.path.join(DB_DIR, "piezoelectricity_pdfs.db")  # Separate DB for PDFs
+PDF_STORAGE_DB = os.path.join(DB_DIR, "piezoelectricity_pdfs.db")
 
+# Temp directory for downloads
+TEMP_DIR = os.path.join(DB_DIR, "temp")
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# Setup logging
+log_file = os.path.join(DB_DIR, "piezoelectricity_query.log")
 logging.basicConfig(
-    filename=os.path.join(DB_DIR, "piezoelectricity_query.log"),
+    filename=log_file,
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 # -------------------------- SESSION STATE --------------------------
@@ -67,56 +81,65 @@ DEFAULT_STATE = {
     "processing": False,
     "search_results": None,
     "relevant_papers": None,
-    "pdf_paths": [],
+    "downloaded_pdfs": {},  # {paper_id: {pdf_bytes, title, authors, year}}
     "zip_buffer": None,
     "processing_time": 0.0,
-    "speed_metrics": {},
-    "db_stats": {"metadata": 0, "universe": 0, "pdfs": 0},
+    "db_stats": {},
+    "search_session_id": None,
+    "temp_files": [],
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-def update_log(msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"[{ts}] {msg}"
+def update_log(message: str):
+    """Update log with timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{timestamp}] {message}"
     st.session_state.log_buffer.append(entry)
     if len(st.session_state.log_buffer) > 50:
         st.session_state.log_buffer.pop(0)
-    logging.info(msg)
+    logging.info(message)
+    
+    # Also update UI log
+    if "log_placeholder" in globals():
+        show_logs()
 
-# -------------------------- DATABASE MANAGER --------------------------
+# -------------------------- DATABASE MANAGER (ENHANCED) --------------------------
 class DatabaseManager:
-    """Manager for SQLite databases with PDF storage"""
+    """Enhanced database manager with reliable PDF storage"""
     
     def __init__(self):
         self.metadata_db = METADATA_DB
         self.universe_db = UNIVERSE_DB
         self.pdf_db = PDF_STORAGE_DB
         self.init_databases()
+        update_log("Database manager initialized")
     
     def init_databases(self):
-        """Initialize all SQLite databases with proper schema"""
-        # Metadata Database (small, fast queries)
+        """Initialize all databases with proper schema"""
+        # Metadata database
         conn = sqlite3.connect(self.metadata_db)
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS papers (
                      id TEXT PRIMARY KEY,
-                     title TEXT,
+                     arxiv_id TEXT UNIQUE,
+                     title TEXT NOT NULL,
                      authors TEXT,
                      year INTEGER,
                      categories TEXT,
                      abstract TEXT,
                      pdf_url TEXT,
-                     arxiv_id TEXT,
                      published_date TEXT,
                      updated_date TEXT,
                      doi TEXT,
+                     relevance_score REAL,
                      matched_terms TEXT,
-                     relevance_prob REAL,
-                     has_pdf BOOLEAN DEFAULT 0,
-                     has_fulltext BOOLEAN DEFAULT 0,
+                     download_status TEXT,
+                     pdf_stored BOOLEAN DEFAULT 0,
+                     fulltext_stored BOOLEAN DEFAULT 0,
                      pdf_size INTEGER,
+                     download_time TIMESTAMP,
                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                      )""")
@@ -129,30 +152,30 @@ class DatabaseManager:
                      end_year INTEGER,
                      max_results INTEGER,
                      threshold REAL,
-                     total_papers INTEGER,
-                     relevant_papers INTEGER,
+                     total_found INTEGER,
+                     relevant_found INTEGER,
+                     downloaded_count INTEGER,
                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                      )""")
         
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_year ON papers(year)""")
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_relevance ON papers(relevance_prob)""")
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_has_pdf ON papers(has_pdf)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_year ON papers(year)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_score ON papers(relevance_score)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_status ON papers(download_status)")
         conn.commit()
         conn.close()
         
-        # Universe Database (full text storage)
+        # Universe database (full text)
         conn = sqlite3.connect(self.universe_db)
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS papers_fulltext (
                      paper_id TEXT PRIMARY KEY,
                      title TEXT,
-                     authors TEXT,
-                     year INTEGER,
                      abstract TEXT,
                      full_text TEXT,
-                     text_hash TEXT,
+                     text_hash TEXT UNIQUE,
                      word_count INTEGER,
-                     section_count INTEGER,
+                     page_count INTEGER,
+                     extraction_status TEXT,
                      extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      FOREIGN KEY (paper_id) REFERENCES metadata.papers(id)
                      )""")
@@ -163,31 +186,29 @@ class DatabaseManager:
                      entity_type TEXT,
                      entity_text TEXT,
                      context TEXT,
-                     score REAL,
+                     page_number INTEGER,
+                     confidence REAL,
+                     extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      FOREIGN KEY (paper_id) REFERENCES papers_fulltext(paper_id)
                      )""")
         
-        c.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
-                     paper_id, title, abstract, full_text,
-                     tokenize="porter"
-                     )""")
+        c.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts 
+                     USING fts5(paper_id, title, abstract, full_text, tokenize='porter')""")
         
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_entities_paper ON extracted_entities(paper_id)""")
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_entities_type ON extracted_entities(entity_type)""")
         conn.commit()
         conn.close()
         
-        # PDF Storage Database (binary storage with compression)
+        # PDF storage database
         conn = sqlite3.connect(self.pdf_db)
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS pdf_storage (
                      paper_id TEXT PRIMARY KEY,
-                     pdf_data BLOB,
+                     pdf_data BLOB NOT NULL,
                      pdf_hash TEXT UNIQUE,
-                     original_filename TEXT,
+                     original_url TEXT,
                      file_size INTEGER,
                      page_count INTEGER,
-                     compression_ratio REAL,
+                     compression_method TEXT DEFAULT 'none',
                      stored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      FOREIGN KEY (paper_id) REFERENCES metadata.papers(id)
                      )""")
@@ -198,100 +219,120 @@ class DatabaseManager:
                      chunk_index INTEGER,
                      chunk_data BLOB,
                      chunk_hash TEXT,
+                     stored_at TIMESTAMP DEFAULT CURRENTESTAMP,
                      FOREIGN KEY (paper_id) REFERENCES pdf_storage(paper_id),
                      UNIQUE(paper_id, chunk_index)
                      )""")
         
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_pdf_hash ON pdf_storage(pdf_hash)""")
-        c.execute("""CREATE INDEX IF NOT EXISTS idx_pdf_size ON pdf_storage(file_size)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pdf_hash ON pdf_storage(pdf_hash)")
         conn.commit()
         conn.close()
-        
-        update_log("All databases initialized")
     
-    def get_db_stats(self) -> Dict[str, int]:
-        """Get statistics for all databases"""
+    def get_db_stats(self) -> Dict[str, Any]:
+        """Get comprehensive database statistics"""
         stats = {}
         
-        # Metadata DB stats
-        conn = sqlite3.connect(self.metadata_db)
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM papers")
-        stats['metadata'] = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM papers WHERE has_pdf = 1")
-        stats['has_pdf'] = c.fetchone()[0]
-        conn.close()
-        
-        # Universe DB stats
-        conn = sqlite3.connect(self.universe_db)
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM papers_fulltext")
-        stats['universe'] = c.fetchone()[0]
-        c.execute("SELECT SUM(word_count) FROM papers_fulltext")
-        stats['total_words'] = c.fetchone()[0] or 0
-        conn.close()
-        
-        # PDF DB stats
-        conn = sqlite3.connect(self.pdf_db)
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM pdf_storage")
-        stats['pdfs'] = c.fetchone()[0]
-        c.execute("SELECT SUM(file_size) FROM pdf_storage")
-        total_size = c.fetchone()[0] or 0
-        stats['total_pdf_size_mb'] = round(total_size / (1024 * 1024), 2)
-        conn.close()
+        try:
+            # Metadata stats
+            conn = sqlite3.connect(self.metadata_db)
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM papers")
+            stats['total_papers'] = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM papers WHERE pdf_stored = 1")
+            stats['pdfs_stored'] = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM papers WHERE fulltext_stored = 1")
+            stats['fulltext_stored'] = c.fetchone()[0]
+            c.execute("SELECT COUNT(DISTINCT year) FROM papers")
+            stats['years_covered'] = c.fetchone()[0]
+            conn.close()
+            
+            # Universe stats
+            conn = sqlite3.connect(self.universe_db)
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM papers_fulltext")
+            stats['fulltext_count'] = c.fetchone()[0]
+            c.execute("SELECT SUM(word_count) FROM papers_fulltext")
+            stats['total_words'] = c.fetchone()[0] or 0
+            conn.close()
+            
+            # PDF storage stats
+            conn = sqlite3.connect(self.pdf_db)
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM pdf_storage")
+            stats['pdf_storage_count'] = c.fetchone()[0]
+            c.execute("SELECT SUM(file_size) FROM pdf_storage")
+            total_bytes = c.fetchone()[0] or 0
+            stats['total_pdf_size_mb'] = round(total_bytes / (1024 * 1024), 2)
+            conn.close()
+            
+        except Exception as e:
+            update_log(f"Error getting DB stats: {e}")
         
         return stats
     
-    def store_pdf(self, paper_id: str, pdf_path: str) -> bool:
-        """Store PDF file in database with deduplication"""
+    def store_paper_metadata(self, paper: Dict[str, Any]) -> bool:
+        """Store paper metadata in database"""
         try:
-            if not os.path.exists(pdf_path):
-                return False
+            conn = sqlite3.connect(self.metadata_db)
+            c = conn.cursor()
             
-            with open(pdf_path, 'rb') as f:
-                pdf_data = f.read()
+            c.execute("""INSERT OR REPLACE INTO papers 
+                         (id, arxiv_id, title, authors, year, categories, abstract, 
+                          pdf_url, published_date, updated_date, doi, relevance_score,
+                          matched_terms, download_status, pdf_stored, fulltext_stored,
+                          pdf_size, download_time)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     (paper.get('id'), paper.get('arxiv_id'), paper.get('title'),
+                      paper.get('authors'), paper.get('year'), paper.get('categories'),
+                      paper.get('abstract'), paper.get('pdf_url'), paper.get('published_date'),
+                      paper.get('updated_date'), paper.get('doi'), paper.get('relevance_score'),
+                      paper.get('matched_terms'), paper.get('download_status'),
+                      paper.get('pdf_stored', 0), paper.get('fulltext_stored', 0),
+                      paper.get('pdf_size', 0), paper.get('download_time')))
             
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            update_log(f"Failed to store metadata for {paper.get('id')}: {e}")
+            return False
+    
+    def store_pdf_data(self, paper_id: str, pdf_bytes: bytes, pdf_url: str) -> bool:
+        """Store PDF bytes in database with deduplication"""
+        try:
             # Calculate hash for deduplication
-            pdf_hash = hashlib.sha256(pdf_data).hexdigest()
+            pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
+            file_size = len(pdf_bytes)
             
-            # Check if PDF already exists (deduplication)
+            # Get page count
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                page_count = len(doc)
+                doc.close()
+            except:
+                page_count = 0
+            
+            # Check if PDF already exists
             conn = sqlite3.connect(self.pdf_db)
             c = conn.cursor()
             c.execute("SELECT paper_id FROM pdf_storage WHERE pdf_hash = ?", (pdf_hash,))
             existing = c.fetchone()
             
             if existing:
-                # PDF already exists, link to this paper
+                # Update metadata to link to existing PDF
                 update_log(f"PDF already exists for {paper_id} (duplicate)")
-                c.execute("""UPDATE metadata.papers 
-                            SET has_pdf = 1, pdf_size = (SELECT file_size FROM pdf_storage WHERE pdf_hash = ?)
-                            WHERE id = ?""", (pdf_hash, paper_id))
-                conn.commit()
-                conn.close()
-                return True
-            
-            # Get PDF metadata
-            try:
-                doc = fitz.open(pdf_path)
-                page_count = len(doc)
-                doc.close()
-            except:
-                page_count = 0
-            
-            file_size = len(pdf_data)
-            
-            # Store in database
-            c.execute("""INSERT OR REPLACE INTO pdf_storage 
-                         (paper_id, pdf_data, pdf_hash, original_filename, file_size, page_count, compression_ratio)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                     (paper_id, sqlite3.Binary(pdf_data), pdf_hash, 
-                      f"{paper_id}.pdf", file_size, page_count, 1.0))
-            
-            # Update metadata
-            c.execute("""UPDATE metadata.papers 
-                        SET has_pdf = 1, pdf_size = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?""", (file_size, paper_id))
+                c.execute("""UPDATE papers SET pdf_stored = 1, pdf_size = ? 
+                            WHERE id = ?""", (file_size, paper_id))
+            else:
+                # Store new PDF
+                c.execute("""INSERT OR REPLACE INTO pdf_storage 
+                             (paper_id, pdf_data, pdf_hash, original_url, file_size, page_count)
+                             VALUES (?, ?, ?, ?, ?, ?)""",
+                         (paper_id, sqlite3.Binary(pdf_bytes), pdf_hash, pdf_url, file_size, page_count))
+                
+                # Update metadata
+                c.execute("""UPDATE papers SET pdf_stored = 1, pdf_size = ? 
+                            WHERE id = ?""", (file_size, paper_id))
             
             conn.commit()
             conn.close()
@@ -303,32 +344,30 @@ class DatabaseManager:
             update_log(f"Failed to store PDF for {paper_id}: {e}")
             return False
     
-    def store_fulltext(self, paper_id: str, title: str, authors: str, year: int, 
-                      abstract: str, full_text: str) -> bool:
+    def store_fulltext(self, paper_id: str, title: str, abstract: str, 
+                      full_text: str, page_count: int = 0) -> bool:
         """Store full text in universe database"""
         try:
             text_hash = hashlib.md5(full_text.encode()).hexdigest()
             word_count = len(full_text.split())
-            section_count = len(full_text.split('\n\n'))
             
             conn = sqlite3.connect(self.universe_db)
             c = conn.cursor()
             
             # Store full text
             c.execute("""INSERT OR REPLACE INTO papers_fulltext 
-                         (paper_id, title, authors, year, abstract, full_text, text_hash, word_count, section_count)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                     (paper_id, title, authors, year, abstract, full_text, text_hash, word_count, section_count))
+                         (paper_id, title, abstract, full_text, text_hash, word_count, page_count)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                     (paper_id, title, abstract, full_text, text_hash, word_count, page_count))
             
-            # Update FTS table
+            # Update FTS
             c.execute("""INSERT OR REPLACE INTO papers_fts 
                          (paper_id, title, abstract, full_text)
                          VALUES (?, ?, ?, ?)""",
                      (paper_id, title, abstract, full_text))
             
             # Update metadata
-            c.execute("""UPDATE metadata.papers 
-                        SET has_fulltext = 1, updated_at = CURRENT_TIMESTAMP
+            c.execute("""UPDATE papers SET fulltext_stored = 1 
                         WHERE id = ?""", (paper_id,))
             
             conn.commit()
@@ -354,777 +393,701 @@ class DatabaseManager:
                 return result[0]
             return None
         except Exception as e:
-            update_log(f"Failed to get PDF for {paper_id}: {e}")
+            update_log(f"Failed to retrieve PDF for {paper_id}: {e}")
             return None
     
-    def get_fulltext(self, paper_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve full text from database"""
+    def get_paper_info(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        """Get complete paper info from all databases"""
         try:
-            conn = sqlite3.connect(self.universe_db)
+            # Get metadata
+            conn = sqlite3.connect(self.metadata_db)
             c = conn.cursor()
-            c.execute("""SELECT title, authors, year, abstract, full_text, word_count 
-                         FROM papers_fulltext WHERE paper_id = ?""", (paper_id,))
-            result = c.fetchone()
+            c.execute("""SELECT title, authors, year, abstract, pdf_url, 
+                                relevance_score, download_status, pdf_stored, fulltext_stored
+                         FROM papers WHERE id = ?""", (paper_id,))
+            meta = c.fetchone()
             conn.close()
             
-            if result:
-                return {
-                    "title": result[0],
-                    "authors": result[1],
-                    "year": result[2],
-                    "abstract": result[3],
-                    "full_text": result[4],
-                    "word_count": result[5]
-                }
-            return None
-        except Exception as e:
-            update_log(f"Failed to get full text for {paper_id}: {e}")
-            return None
-    
-    def search_fulltext(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """Search full text using FTS"""
-        try:
+            if not meta:
+                return None
+            
+            # Get PDF info
+            pdf_bytes = self.get_pdf(paper_id)
+            
+            # Get full text info
             conn = sqlite3.connect(self.universe_db)
             c = conn.cursor()
-            
-            # Search in FTS table
-            c.execute("""SELECT paper_id, title, abstract, 
-                        snippet(papers_fts, 2, '<b>', '</b>', '...', 30) as snippet
-                         FROM papers_fts 
-                         WHERE papers_fts MATCH ? 
-                         ORDER BY rank 
-                         LIMIT ?""", (query, limit))
-            
-            results = []
-            for row in c.fetchall():
-                results.append({
-                    "paper_id": row[0],
-                    "title": row[1],
-                    "abstract": row[2],
-                    "snippet": row[3]
-                })
-            
+            c.execute("SELECT word_count FROM papers_fulltext WHERE paper_id = ?", (paper_id,))
+            fulltext_info = c.fetchone()
             conn.close()
-            return results
+            
+            return {
+                'title': meta[0],
+                'authors': meta[1],
+                'year': meta[2],
+                'abstract': meta[3],
+                'pdf_url': meta[4],
+                'relevance_score': meta[5],
+                'download_status': meta[6],
+                'has_pdf': meta[7],
+                'has_fulltext': meta[8],
+                'pdf_bytes': pdf_bytes,
+                'word_count': fulltext_info[0] if fulltext_info else 0
+            }
         except Exception as e:
-            update_log(f"Full text search failed: {e}")
-            return []
+            update_log(f"Failed to get paper info for {paper_id}: {e}")
+            return None
     
-    def create_zip_buffer(self, paper_ids: List[str]) -> io.BytesIO:
-        """Create ZIP file in memory from database PDFs"""
+    def create_zip_from_db(self, paper_ids: List[str]) -> io.BytesIO:
+        """Create ZIP file from database PDFs"""
         zip_buffer = io.BytesIO()
         
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for paper_id in paper_ids:
-                pdf_data = self.get_pdf(paper_id)
-                if pdf_data:
-                    # Get paper info for filename
-                    conn = sqlite3.connect(self.metadata_db)
-                    c = conn.cursor()
-                    c.execute("SELECT title, authors, year FROM papers WHERE id = ?", (paper_id,))
-                    paper_info = c.fetchone()
-                    conn.close()
-                    
-                    if paper_info:
-                        title, authors, year = paper_info
-                        # Create safe filename
-                        safe_title = re.sub(r'[^\w\s-]', '', title)[:50]
-                        safe_authors = re.sub(r'[^\w\s-]', '', authors.split(',')[0])[:30]
-                        filename = f"{paper_id}_{safe_authors}_{year}_{safe_title}.pdf"
-                        filename = filename.replace(' ', '_')
-                    else:
-                        filename = f"{paper_id}.pdf"
-                    
-                    zip_file.writestr(filename, pdf_data)
+        try:
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                for paper_id in paper_ids:
+                    pdf_data = self.get_pdf(paper_id)
+                    if pdf_data:
+                        # Get paper info for filename
+                        info = self.get_paper_info(paper_id)
+                        if info:
+                            # Create safe filename
+                            title = re.sub(r'[^\w\s-]', '', info['title'])[:100]
+                            authors = info['authors'].split(',')[0][:50] if info['authors'] else 'unknown'
+                            filename = f"{paper_id}_{authors}_{info['year']}_{title}.pdf"
+                            filename = re.sub(r'\s+', '_', filename)
+                        else:
+                            filename = f"{paper_id}.pdf"
+                        
+                        zip_file.writestr(filename, pdf_data)
+            
+            zip_buffer.seek(0)
+            update_log(f"Created ZIP with {len(paper_ids)} PDFs")
+            
+        except Exception as e:
+            update_log(f"Failed to create ZIP: {e}")
         
-        zip_buffer.seek(0)
         return zip_buffer
     
-    def export_metadata(self, format: str = "csv") -> bytes:
+    def export_metadata(self, format: str = "csv") -> io.BytesIO:
         """Export metadata in various formats"""
-        conn = sqlite3.connect(self.metadata_db)
-        
-        if format.lower() == "csv":
-            df = pd.read_sql_query("SELECT * FROM papers", conn)
-            output = df.to_csv(index=False).encode()
-        elif format.lower() == "json":
-            df = pd.read_sql_query("SELECT * FROM papers", conn)
-            output = df.to_json(orient="records", indent=2).encode()
-        elif format.lower() == "sql":
-            # Dump SQL
-            output = b""
-            for line in conn.iterdump():
-                output += line.encode() + b'\n'
-        else:
-            output = b""
-        
-        conn.close()
-        return output
-    
-    def backup_databases(self) -> io.BytesIO:
-        """Create backup of all databases"""
-        backup_buffer = io.BytesIO()
-        
-        with zipfile.ZipFile(backup_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Backup metadata DB
-            with open(self.metadata_db, 'rb') as f:
-                zip_file.writestr("metadata.db", f.read())
+        try:
+            conn = sqlite3.connect(self.metadata_db)
             
-            # Backup universe DB
-            with open(self.universe_db, 'rb') as f:
-                zip_file.writestr("universe.db", f.read())
+            if format.lower() == "csv":
+                df = pd.read_sql_query("SELECT * FROM papers", conn)
+                output = io.BytesIO()
+                df.to_csv(output, index=False)
+                output.seek(0)
+            elif format.lower() == "json":
+                df = pd.read_sql_query("SELECT * FROM papers", conn)
+                output = io.BytesIO()
+                df.to_json(output, orient="records", indent=2)
+                output.seek(0)
+            elif format.lower() == "excel":
+                df = pd.read_sql_query("SELECT * FROM papers", conn)
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Papers')
+                output.seek(0)
+            else:
+                output = io.BytesIO()
             
-            # Backup PDF DB
-            with open(self.pdf_db, 'rb') as f:
-                zip_file.writestr("pdf_storage.db", f.read())
+            conn.close()
+            return output
             
-            # Add stats
-            stats = self.get_db_stats()
-            zip_file.writestr("stats.json", json.dumps(stats, indent=2))
-        
-        backup_buffer.seek(0)
-        return backup_buffer
+        except Exception as e:
+            update_log(f"Export failed: {e}")
+            return io.BytesIO()
 
 # Initialize database manager
 db_manager = DatabaseManager()
 
-# -------------------------- HEALTH & SPEED METRICS --------------------------
-def health_check() -> bool:
-    mem = psutil.Process().memory_info().rss / 1024 / 1024
-    free_gb = psutil.disk_usage(DB_DIR).free / (1024**3)
-    update_log(f"RAM {mem:.1f} MB | Disk free {free_gb:.1f} GB")
-    if mem > 1500:
-        st.warning(f"High RAM ({mem:.1f} MB)")
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    if free_gb < 0.5:
-        st.error("Low disk space")
-        return False
-    return True
-
-# -------------------------- HTTP RETRY --------------------------
-def retry_session():
-    s = requests.Session()
-    r = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-    s.mount("http://", HTTPAdapter(max_retries=r))
-    s.mount("https://", HTTPAdapter(max_retries=r))
-    return s
-
-# -------------------------- KEYWORD MATCHER --------------------------
-class KeywordMatcher:
-    """Optimized keyword matching"""
+# -------------------------- PDF DOWNLOAD FUNCTIONS (ENHANCED) --------------------------
+def download_pdf_bytes(pdf_url: str) -> Optional[bytes]:
+    """Download PDF as bytes with proper headers and retry logic"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    }
     
-    def __init__(self):
-        self.patterns = KEY_PATTERNS
-        self.compiled_regex = [re.compile(p, re.IGNORECASE) for p in self.patterns]
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def _download():
+        session = requests.Session()
+        session.mount('https://', HTTPAdapter(max_retries=3))
+        response = session.get(pdf_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.content
     
-    def score_abstract(self, abstract: str) -> float:
-        """Fast scoring without SciBERT"""
-        n = sum(bool(p.search(abstract.lower())) for p in self.compiled_regex)
-        return np.sqrt(n) / np.sqrt(len(self.patterns))
-
-keyword_matcher = KeywordMatcher()
-
-# -------------------------- SciBERT --------------------------
-@st.cache_resource
-def load_scibert():
-    tok = AutoTokenizer.from_pretrained("allenai/scibert_scivocab_uncased")
-    mdl = AutoModel.from_pretrained("allenai/scibert_scivocab_uncased")
-    mdl.eval()
-    
-    if torch.cuda.is_available():
-        mdl = mdl.to('cuda')
-        update_log("SciBERT loaded on GPU")
-    else:
-        update_log("SciBERT loaded on CPU")
-    
-    return tok, mdl
-
-scibert_tok, scibert_mdl = load_scibert()
-
-def score_with_scibert(abstract: str) -> float:
-    """Score abstract with SciBERT attention"""
     try:
-        enc = scibert_tok(abstract, return_tensors="pt", truncation=True, max_length=512, padding=True)
-        
-        if torch.cuda.is_available():
-            enc = {k: v.to('cuda') for k, v in enc.items()}
-        
-        with torch.no_grad():
-            out = scibert_mdl(**enc, output_attentions=True)
-        
-        # Combine keyword score with attention
-        kw_score = keyword_matcher.score_abstract(abstract)
-        
-        # Get attention boost
-        tokens = scibert_tok.convert_ids_to_tokens(enc["input_ids"][0])
-        kw_idx = [i for i, t in enumerate(tokens) if any(k in t.lower() for k in ["pvdf","piezo","phase","beta","alpha"])]
-        
-        if kw_idx:
-            att = out.attentions[-1][0,0].cpu().numpy()
-            boost = np.mean(att[kw_idx, :])
-            if boost > 0.1:
-                kw_score = min(kw_score + 0.2 * len(kw_idx)/len(tokens), 1.0)
-        
-        return kw_score
-        
+        pdf_bytes = _download()
+        if len(pdf_bytes) < 1024:  # Less than 1KB is suspicious
+            raise ValueError("PDF file too small, likely an error page")
+        return pdf_bytes
     except Exception as e:
-        update_log(f"SciBERT error: {e}")
-        return keyword_matcher.score_abstract(abstract)
+        update_log(f"Download failed for {pdf_url}: {e}")
+        return None
 
-# -------------------------- PDF PROCESSING --------------------------
-def extract_pdf_text(pdf_path: str, max_pages: int = 50) -> str:
-    """Extract text from PDF with error handling"""
+def extract_text_from_bytes(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes"""
     try:
-        doc = fitz.open(pdf_path)
-        texts = []
-        
-        for i in range(min(len(doc), max_pages)):
-            page = doc[i]
-            text = page.get_text()
-            if text.strip():
-                texts.append(text)
-        
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text = ""
+        for page_num in range(min(50, len(doc))):  # Limit to first 50 pages
+            page = doc[page_num]
+            text += page.get_text()
         doc.close()
         
-        if not texts:
-            return "No text extracted"
-        
-        full_text = "\n".join(texts)
         # Clean up text
-        full_text = re.sub(r'\s+', ' ', full_text)
-        return full_text[:1000000]  # Limit to 1MB
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:1000000]  # Limit to 1MB
         
     except Exception as e:
         return f"Error extracting text: {str(e)}"
 
-# -------------------------- ARXIV QUERY --------------------------
-@st.cache_data(ttl=3600)
-def query_arxiv(_query: str, cats: list, max_res: int, sy: int, ey: int):
-    """Query arXiv for papers"""
-    client = arxiv.Client()
-    search = arxiv.Search(
-        query=_query,
-        max_results=max_res,
-        sort_by=arxiv.SortCriterion.Relevance,
-        sort_order=arxiv.SortOrder.Descending
-    )
+def handle_paper_download(paper: Dict[str, Any], manual_download: bool = False) -> Dict[str, Any]:
+    """Handle downloading and storing of a single paper"""
+    paper_id = paper['id']
     
-    out = []
-    qwords = {w.strip('"').lower() for w in _query.split("OR")}
-    
-    for r in client.results(search):
-        if not (any(c in r.categories for c in cats) and sy <= r.published.year <= ey):
-            continue
-        
-        matched = [w for w in qwords if w in r.summary.lower() or w in r.title.lower()]
-        if not matched:
-            continue
-        
-        rel = score_with_scibert(r.summary)
-        
-        out.append({
-            "id": r.entry_id.split("/")[-1],
-            "arxiv_id": r.entry_id,
-            "title": r.title,
-            "authors": ", ".join(a.name for a in r.authors),
-            "year": r.published.year,
-            "categories": ", ".join(r.categories),
-            "abstract": r.summary,
-            "pdf_url": r.pdf_url,
-            "published_date": r.published.isoformat(),
-            "updated_date": r.updated.isoformat() if r.updated else r.published.isoformat(),
-            "doi": r.doi if hasattr(r, 'doi') and r.doi else None,
-            "download_status": "Pending",
-            "matched_terms": ", ".join(matched),
-            "relevance_prob": round(rel * 100, 2),
-            "has_pdf": 0,
-            "has_fulltext": 0,
-            "pdf_size": 0
-        })
-        
-        if len(out) >= max_res:
-            break
-    
-    return sorted(out, key=lambda x: x["relevance_prob"], reverse=True)
-
-# -------------------------- DOWNLOAD AND STORE --------------------------
-@retry(stop=stop_after_attempt(4), wait=wait_fixed(2))
-def download_and_store(paper: dict, temp_dir: str) -> dict:
-    """Download PDF and store in database"""
-    pid = paper["id"]
-    temp_path = os.path.join(temp_dir, f"{pid}.pdf")
+    # If manual download, check session state first
+    if manual_download and paper_id in st.session_state.downloaded_pdfs:
+        update_log(f"PDF for {paper_id} already in session")
+        return paper
     
     try:
         # Download PDF
-        s = retry_session()
-        resp = s.get(paper["pdf_url"], timeout=30, headers={"User-Agent": "arXiv-PDF-Downloader/1.0"})
-        resp.raise_for_status()
+        update_log(f"Downloading PDF for {paper_id}...")
+        pdf_bytes = download_pdf_bytes(paper['pdf_url'])
         
-        with open(temp_path, "wb") as f:
-            f.write(resp.content)
-        
-        time.sleep(random.uniform(0.3, 0.7))
+        if pdf_bytes is None:
+            paper['download_status'] = "Failed to download"
+            return paper
         
         # Extract text
-        full_text = extract_pdf_text(temp_path)
+        full_text = extract_text_from_bytes(pdf_bytes)
         
         # Store in databases
-        # 1. Store PDF in PDF storage DB
-        pdf_stored = db_manager.store_pdf(pid, temp_path)
+        pdf_stored = db_manager.store_pdf_data(paper_id, pdf_bytes, paper['pdf_url'])
         
-        # 2. Store full text in universe DB
         if not full_text.startswith("Error"):
             text_stored = db_manager.store_fulltext(
-                pid, paper["title"], paper["authors"], paper["year"],
-                paper["abstract"], full_text
+                paper_id, paper['title'], paper['abstract'], full_text
             )
         else:
             text_stored = False
         
-        # Update paper status
-        paper.update({
-            "download_status": "✓ Downloaded and stored in DB",
-            "has_pdf": 1 if pdf_stored else 0,
-            "has_fulltext": 1 if text_stored else 0,
-            "pdf_size": os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
-        })
+        # Store metadata
+        paper['pdf_stored'] = 1 if pdf_stored else 0
+        paper['fulltext_stored'] = 1 if text_stored else 0
+        paper['pdf_size'] = len(pdf_bytes)
+        paper['download_time'] = datetime.now().isoformat()
+        paper['download_status'] = "Successfully downloaded and stored"
         
-        update_log(f"Success: {pid} - PDF:{'✓' if pdf_stored else '✗'} Text:{'✓' if text_stored else '✗'}")
+        # Update session state
+        st.session_state.downloaded_pdfs[paper_id] = {
+            'pdf_bytes': pdf_bytes,
+            'title': paper['title'],
+            'authors': paper['authors'],
+            'year': paper['year']
+        }
+        
+        # Update paper in metadata DB
+        db_manager.store_paper_metadata(paper)
+        
+        update_log(f"✅ Successfully processed {paper_id}")
         
     except Exception as e:
-        paper.update({
-            "download_status": f"✗ Failed: {str(e)[:100]}",
-            "has_pdf": 0,
-            "has_fulltext": 0
-        })
-        update_log(f"Failed {pid}: {e}")
-    
-    finally:
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        paper['download_status'] = f"Failed: {str(e)[:100]}"
+        update_log(f"❌ Failed to process {paper_id}: {e}")
     
     return paper
 
-# -------------------------- UI --------------------------
-st.title("📚 Piezoelectricity in PVDF – SQLite PDF Storage")
-st.markdown("""
-**Advanced scientific paper search with SQLite database storage**
-- **PDF Storage**: All PDFs stored in SQLite database with deduplication
-- **Full-Text Search**: Full papers stored in separate database
-- **Multiple Downloads**: Individual PDFs, ZIP archives, database exports
-- **Cloud Ready**: All data stored in SQLite files (portable)
-""")
-
-# ---------- DATABASE STATS ----------
-with st.expander("📊 Database Statistics", expanded=True):
-    stats = db_manager.get_db_stats()
-    col1, col2, col3, col4 = st.columns(4)
+# -------------------------- ARXIV QUERY FUNCTIONS --------------------------
+@st.cache_data(ttl=3600)
+def query_arxiv(query: str, categories: List[str], max_results: int, 
+                start_year: int, end_year: int) -> List[Dict[str, Any]]:
+    """Query arXiv API for papers"""
+    client = arxiv.Client()
+    search = arxiv.Search(
+        query=query,
+        max_results=min(max_results * 2, 500),
+        sort_by=arxiv.SortCriterion.Relevance,
+        sort_order=arxiv.SortOrder.Descending
+    )
     
-    with col1:
-        st.metric("Metadata Papers", stats['metadata'])
-    with col2:
-        st.metric("PDFs Stored", stats['pdfs'])
-    with col3:
-        st.metric("Full Text Papers", stats['universe'])
-    with col4:
-        st.metric("Total PDF Size", f"{stats.get('total_pdf_size_mb', 0)} MB")
+    results = []
+    query_terms = {term.strip('"').lower() for term in query.split('OR')}
     
-    if stats['metadata'] > 0:
-        st.progress(stats['pdfs'] / stats['metadata'], text=f"PDF Coverage: {stats['pdfs']}/{stats['metadata']}")
+    for result in client.results(search):
+        # Filter by category and year
+        if not (any(cat in result.categories for cat in categories) and 
+                start_year <= result.published.year <= end_year):
+            continue
+        
+        # Check for query terms in abstract or title
+        abstract_lower = result.summary.lower()
+        title_lower = result.title.lower()
+        matched_terms = [term for term in query_terms if term in abstract_lower or term in title_lower]
+        
+        if not matched_terms:
+            continue
+        
+        # Calculate relevance score (simplified for now)
+        relevance_score = min(len(matched_terms) / len(query_terms) * 100, 100)
+        
+        paper = {
+            'id': result.entry_id.split('/')[-1],
+            'arxiv_id': result.entry_id,
+            'title': result.title,
+            'authors': ', '.join(a.name for a in result.authors),
+            'year': result.published.year,
+            'categories': ', '.join(result.categories),
+            'abstract': result.summary,
+            'pdf_url': result.pdf_url,
+            'published_date': result.published.isoformat(),
+            'updated_date': result.updated.isoformat() if result.updated else result.published.isoformat(),
+            'doi': result.doi if hasattr(result, 'doi') and result.doi else None,
+            'relevance_score': round(relevance_score, 2),
+            'matched_terms': ', '.join(matched_terms),
+            'download_status': 'Pending',
+            'pdf_stored': 0,
+            'fulltext_stored': 0,
+            'pdf_size': 0,
+            'download_time': None
+        }
+        
+        results.append(paper)
+        
+        if len(results) >= max_results:
+            break
+    
+    # Sort by relevance
+    results.sort(key=lambda x: x['relevance_score'], reverse=True)
+    return results[:max_results]
 
-# ---------- LOG AREA ----------
-log_placeholder = st.empty()
+# -------------------------- UI COMPONENTS --------------------------
 def show_logs():
+    """Display log messages"""
     if st.session_state.log_buffer:
-        with st.expander("📝 Processing Logs", expanded=False):
-            log_placeholder.text_area(
+        with st.expander("📋 Processing Logs", expanded=False):
+            st.text_area(
                 "Logs",
                 "\n".join(st.session_state.log_buffer[-20:]),
                 height=150,
-                key="log_area",
+                key="log_display",
                 label_visibility="collapsed"
             )
-    else:
-        log_placeholder.empty()
 
+def create_dashboard():
+    """Create dashboard with statistics"""
+    stats = db_manager.get_db_stats()
+    
+    st.subheader("📊 Database Statistics")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Papers", stats.get('total_papers', 0))
+    with col2:
+        st.metric("PDFs Stored", stats.get('pdfs_stored', 0))
+    with col3:
+        st.metric("Full Text Papers", stats.get('fulltext_stored', 0))
+    with col4:
+        st.metric("Total Size", f"{stats.get('total_pdf_size_mb', 0):.1f} MB")
+    
+    if stats.get('total_papers', 0) > 0:
+        pdf_coverage = (stats.get('pdfs_stored', 0) / stats.get('total_papers', 1)) * 100
+        st.progress(pdf_coverage / 100, text=f"PDF Coverage: {pdf_coverage:.1f}%")
+
+# -------------------------- MAIN APP --------------------------
+st.title("🔬 Piezoelectricity in PVDF Research Tool")
+st.markdown("""
+**Advanced tool for searching, downloading, and analyzing piezoelectricity research in PVDF materials.**
+
+Features:
+- **Smart Search**: Query arXiv with relevance scoring
+- **PDF Storage**: Store PDFs in SQLite databases with deduplication
+- **Full-Text Extraction**: Extract and search paper content
+- **Multiple Export Formats**: Download papers individually or in bulk
+- **Database Management**: View statistics and manage stored papers
+""")
+
+# Show warnings if on cloud
+if IS_CLOUD:
+    st.warning("""
+    ⚠️ **Running on Streamlit Cloud**: 
+    - PDF downloads are manual (click individual buttons)
+    - Use 'Download All' button for bulk downloads
+    - Data is stored temporarily (may be cleared between sessions)
+    """)
+
+# Initialize log display
 show_logs()
 
-# ---------- SIDEBAR ----------
+# Sidebar configuration
 with st.sidebar:
     st.header("🔍 Search Configuration")
     
-    # Search options
-    q = st.text_input(
-        "Query",
-        value=' OR '.join(f'"{t}"' for t in [
-            "piezoelectricity", "PVDF", "beta phase", "electrospun nanofibers",
-            "SnO2", "dopants", "efficiency", "nanogenerators"
-        ]),
-        help="Use OR for multiple terms, quotes for exact phrases"
-    )
+    # Query input
+    default_query = ' OR '.join([
+        '"piezoelectricity"', '"PVDF"', '"beta phase"', '"electrospun nanofibers"',
+        '"SnO2"', '"dopants"', '"efficiency"', '"nanogenerators"'
+    ])
+    query = st.text_area("Search Query", value=default_query, height=100,
+                        help="Use OR to combine terms, quotes for exact phrases")
     
-    cats = st.multiselect(
-        "Categories",
-        ["cond-mat.mtrl-sci", "physics.app-ph", "cond-mat", "physics"],
-        default=["cond-mat.mtrl-sci", "physics.app-ph"]
-    )
+    # Categories
+    default_cats = ["cond-mat.mtrl-sci", "physics.app-ph", "physics.chem-ph"]
+    categories = st.multiselect("Categories", default_cats, default=default_cats[:2])
     
-    col1, col2 = st.columns(2)
-    max_res = col1.slider("Max Results", 1, 100, 30)
-    rel_thr = col2.slider("Threshold %", 0, 100, 30)
+    # Year range
+    current_year = datetime.now().year
+    col_year1, col_year2 = st.columns(2)
+    with col_year1:
+        start_year = st.number_input("Start Year", 1990, current_year, 2010)
+    with col_year2:
+        end_year = st.number_input("End Year", start_year, current_year, current_year)
     
-    col3, col4 = st.columns(2)
-    sy = col3.number_input("Start Year", 2000, datetime.now().year, 2015)
-    ey = col4.number_input("End Year", sy, datetime.now().year, datetime.now().year)
+    # Result limits
+    max_results = st.slider("Maximum Results", 1, 100, 20)
+    relevance_threshold = st.slider("Relevance Threshold (%)", 0, 100, 30)
     
     # Download options
     st.subheader("💾 Storage Options")
-    store_pdfs = st.checkbox("Store PDFs in Database", value=True, 
-                            help="Store PDF files in SQLite database")
-    store_text = st.checkbox("Extract Full Text", value=True,
-                            help="Extract and store full text from PDFs")
+    auto_download = st.checkbox("Auto-download PDFs", value=not IS_CLOUD,
+                               disabled=IS_CLOUD,
+                               help="Automatically download PDFs (disabled on cloud)")
     
-    # Output formats
+    # Export formats
     st.subheader("📤 Export Options")
     export_formats = st.multiselect(
-        "Export Formats",
-        ["SQLite", "CSV", "JSON", "ZIP", "Backup"],
-        default=["SQLite", "ZIP"]
+        "Select export formats",
+        ["ZIP Archive", "CSV", "JSON", "Excel", "Database Backup"],
+        default=["ZIP Archive", "CSV"]
     )
     
-    # Buttons
+    # Action buttons
     col_btn1, col_btn2 = st.columns(2)
-    search_btn = col_btn1.button("🔍 Search & Download", type="primary", use_container_width=True)
-    reset_btn = col_btn2.button("🔄 Reset", use_container_width=True)
+    with col_btn1:
+        search_btn = st.button("🔍 Search arXiv", type="primary", use_container_width=True)
+    with col_btn2:
+        if st.button("🔄 Reset Session", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                if key not in ["page_config_set", "log_buffer"]:
+                    st.session_state[key] = DEFAULT_STATE[key]
+            st.rerun()
     
-    # Full-text search
-    st.subheader("🔎 Full-Text Search")
-    ft_query = st.text_input("Search in stored papers", placeholder="e.g., piezoelectric coefficient d33")
-    if st.button("Search Database", key="ft_search"):
-        if ft_query:
-            with st.spinner("Searching..."):
-                results = db_manager.search_fulltext(ft_query)
-                if results:
-                    st.success(f"Found {len(results)} papers")
-                    for r in results:
-                        with st.expander(f"{r['title'][:80]}..."):
-                            st.write(f"**Snippet:** {r['snippet']}")
-                else:
-                    st.warning("No results found")
+    # Database search
+    st.subheader("🔎 Search Database")
+    db_query = st.text_input("Search stored papers", placeholder="e.g., d33 coefficient")
+    if st.button("Search in Database", use_container_width=True):
+        if db_query:
+            conn = sqlite3.connect(db_manager.universe_db)
+            c = conn.cursor()
+            c.execute("""SELECT paper_id, title, snippet(papers_fts, 2, '<b>', '</b>', '...', 30) 
+                         FROM papers_fts WHERE papers_fts MATCH ? LIMIT 10""", (db_query,))
+            results = c.fetchall()
+            conn.close()
+            
+            if results:
+                st.success(f"Found {len(results)} papers")
+                for paper_id, title, snippet in results:
+                    with st.expander(f"{title[:80]}..."):
+                        st.write(f"**ID:** {paper_id}")
+                        st.write(f"**Snippet:** {snippet}")
+                        if st.button("View Paper", key=f"view_{paper_id}"):
+                            # Store paper_id for viewing
+                            st.session_state.view_paper = paper_id
+            else:
+                st.warning("No results found")
 
-if reset_btn:
-    for k in list(st.session_state.keys()):
-        if k not in ["page_config_set", "log_buffer"]:
-            st.session_state[k] = DEFAULT_STATE[k]
-    st.rerun()
+# Main content area
+create_dashboard()
 
-# -------------------------- MAIN PROCESSING --------------------------
+# -------------------------- SEARCH AND PROCESSING --------------------------
 if search_btn:
-    if not q.strip() or not cats:
-        st.error("Please enter a query and select categories")
+    if not query.strip():
+        st.error("Please enter a search query")
         st.stop()
     
-    if not health_check():
+    if not categories:
+        st.error("Please select at least one category")
         st.stop()
     
     st.session_state.processing = True
     start_time = time.time()
     
-    # Create temp directory for downloads
-    temp_dir = os.path.join(DB_DIR, "temp_pdfs")
-    os.makedirs(temp_dir, exist_ok=True)
-    
+    # Search arXiv
     with st.spinner("🔍 Searching arXiv..."):
-        all_papers = query_arxiv(q, cats, max_res, sy, ey)
+        papers = query_arxiv(query, categories, max_results, start_year, end_year)
     
-    if not all_papers:
+    if not papers:
         st.warning("No papers found matching your criteria")
         st.session_state.processing = False
         st.stop()
     
     # Filter by relevance
-    relevant = [p for p in all_papers if p["relevance_prob"] >= rel_thr]
+    relevant_papers = [p for p in papers if p['relevance_score'] >= relevance_threshold]
     
-    if not relevant:
-        st.warning(f"No papers above {rel_thr}% relevance threshold")
+    if not relevant_papers:
+        st.warning(f"No papers above {relevance_threshold}% relevance threshold")
         st.session_state.processing = False
         st.stop()
     
-    st.success(f"Found **{len(relevant)}** relevant papers")
+    st.success(f"Found **{len(relevant_papers)}** relevant papers")
     
-    # Download and store papers
-    if relevant and (store_pdfs or store_text):
+    # Download papers
+    if auto_download and not IS_CLOUD:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for paper in relevant:
-                if store_pdfs:
-                    futures.append(executor.submit(download_and_store, paper, temp_dir))
-                else:
-                    # Just store metadata if PDF storage is disabled
-                    futures.append(executor.submit(lambda p: p, paper))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(handle_paper_download, paper): i 
+                      for i, paper in enumerate(relevant_papers)}
             
             completed = 0
             for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
+                paper = future.result()
+                relevant_papers[idx] = paper
+                
                 completed += 1
-                progress_bar.progress(completed / len(futures))
-                status_text.text(f"Downloaded {completed}/{len(futures)} papers")
+                progress_bar.progress(completed / len(relevant_papers))
+                status_text.text(f"Processed {completed}/{len(relevant_papers)} papers")
         
         progress_bar.empty()
         status_text.empty()
     
-    # Store metadata in database
-    if relevant:
-        conn = sqlite3.connect(db_manager.metadata_db)
-        for paper in relevant:
-            # Convert to tuple for insertion
-            paper_tuple = (
-                paper["id"], paper["title"], paper["authors"], paper["year"],
-                paper["categories"], paper["abstract"], paper["pdf_url"],
-                paper["arxiv_id"], paper["published_date"], paper["updated_date"],
-                paper["doi"], paper["matched_terms"], paper["relevance_prob"],
-                paper.get("has_pdf", 0), paper.get("has_fulltext", 0),
-                paper.get("pdf_size", 0)
-            )
-            
-            conn.execute("""INSERT OR REPLACE INTO papers 
-                          (id, title, authors, year, categories, abstract, pdf_url,
-                           arxiv_id, published_date, updated_date, doi, matched_terms,
-                           relevance_prob, has_pdf, has_fulltext, pdf_size)
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
-                        paper_tuple)
-        
-        conn.commit()
-        conn.close()
-        
-        update_log(f"Metadata stored for {len(relevant)} papers")
-    
-    # Create ZIP buffer if requested
-    if "ZIP" in export_formats and store_pdfs:
-        paper_ids = [p["id"] for p in relevant if p.get("has_pdf")]
-        if paper_ids:
-            with st.spinner("Creating ZIP archive..."):
-                st.session_state.zip_buffer = db_manager.create_zip_buffer(paper_ids)
-                update_log(f"Created ZIP with {len(paper_ids)} PDFs")
-    
-    # Update session state
-    st.session_state.relevant_papers = relevant
+    # Store results in session state
+    st.session_state.relevant_papers = relevant_papers
     st.session_state.processing_time = time.time() - start_time
-    st.session_state.processing = False
     
-    # Clean up temp directory
-    import shutil
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-    
-    # Show completion message
-    st.balloons()
-    st.success(f"✅ Processing complete in {st.session_state.processing_time:.1f} seconds")
+    update_log(f"Search completed in {st.session_state.processing_time:.1f} seconds")
 
-# -------------------------- RESULTS DISPLAY --------------------------
-if st.session_state.relevant_papers:
+# -------------------------- DISPLAY RESULTS --------------------------
+if st.session_state.get('relevant_papers'):
     papers = st.session_state.relevant_papers
     df = pd.DataFrame(papers)
     
-    st.subheader(f"📄 Results ({len(papers)} papers)")
+    st.subheader(f"📄 Search Results ({len(papers)} papers)")
     
-    # Display papers in an interactive table
+    # Display each paper
     for i, paper in enumerate(papers):
-        with st.expander(f"📑 {paper['title'][:100]}...", expanded=i < 3):
-            col1, col2, col3 = st.columns([3, 1, 1])
+        with st.expander(f"**{paper['title']}** ({paper['year']}) - {paper['relevance_score']}%", 
+                        expanded=i < 2):
+            col_info, col_actions = st.columns([3, 1])
             
-            with col1:
+            with col_info:
                 st.write(f"**Authors:** {paper['authors']}")
-                st.write(f"**Year:** {paper['year']} | **Categories:** {paper['categories']}")
-                st.write(f"**Relevance:** {paper['relevance_prob']}%")
+                st.write(f"**Categories:** {paper['categories']}")
+                st.write(f"**Matched Terms:** {paper['matched_terms']}")
                 st.write(f"**Status:** {paper['download_status']}")
                 
-                if paper.get('has_pdf'):
-                    st.success("✓ PDF stored in database")
-                if paper.get('has_fulltext'):
-                    st.success("✓ Full text extracted")
+                # Show abstract (collapsed)
+                with st.expander("Abstract"):
+                    st.write(paper['abstract'])
             
-            with col2:
-                # Individual PDF download
-                if paper.get('has_pdf'):
-                    pdf_data = db_manager.get_pdf(paper['id'])
-                    if pdf_data:
+            with col_actions:
+                # Download button for individual PDF
+                if paper.get('pdf_stored') or paper['id'] in st.session_state.downloaded_pdfs:
+                    # Get PDF bytes
+                    if paper['id'] in st.session_state.downloaded_pdfs:
+                        pdf_bytes = st.session_state.downloaded_pdfs[paper['id']]['pdf_bytes']
+                    else:
+                        pdf_bytes = db_manager.get_pdf(paper['id'])
+                    
+                    if pdf_bytes:
+                        # Create safe filename
+                        safe_title = re.sub(r'[^\w\s-]', '', paper['title'])[:50]
+                        filename = f"{paper['id']}_{safe_title}.pdf".replace(' ', '_')
+                        
                         st.download_button(
                             label="📥 Download PDF",
-                            data=pdf_data,
-                            file_name=f"{paper['id']}.pdf",
+                            data=pdf_bytes,
+                            file_name=filename,
                             mime="application/pdf",
-                            key=f"pdf_{paper['id']}_{i}",
+                            key=f"dl_{paper['id']}_{i}",
                             use_container_width=True
                         )
-            
-            with col3:
-                # Full text view
-                if paper.get('has_fulltext'):
-                    if st.button("📖 View Full Text", key=f"view_{paper['id']}"):
-                        fulltext = db_manager.get_fulltext(paper['id'])
-                        if fulltext:
-                            with st.expander("Full Text", expanded=True):
-                                st.write(fulltext['full_text'][:5000] + "..." if len(fulltext['full_text']) > 5000 else fulltext['full_text'])
+                else:
+                    # Manual download button
+                    if st.button("⬇️ Download Now", key=f"manual_{paper['id']}", 
+                                use_container_width=True):
+                        with st.spinner("Downloading..."):
+                            updated_paper = handle_paper_download(paper, manual_download=True)
+                            papers[i] = updated_paper
+                            st.rerun()
+                
+                # Links
+                st.markdown(f"[🌐 arXiv Page]({paper['pdf_url'].replace('/pdf/', '/abs/')})")
+                st.markdown(f"[📄 Direct PDF]({paper['pdf_url']})")
     
     # -------------------------- EXPORT SECTION --------------------------
-    st.subheader("📤 Export Options")
+    st.subheader("📤 Export Results")
     
-    # Create columns for export buttons
     export_cols = st.columns(5)
     
     # 1. ZIP Export
-    if "ZIP" in export_formats and st.session_state.zip_buffer:
+    if "ZIP Archive" in export_formats:
         with export_cols[0]:
-            st.download_button(
-                label="📦 Download ZIP",
-                data=st.session_state.zip_buffer.getvalue() if hasattr(st.session_state.zip_buffer, 'getvalue') else st.session_state.zip_buffer,
-                file_name="piezoelectricity_papers.zip",
-                mime="application/zip",
-                use_container_width=True
-            )
+            paper_ids = [p['id'] for p in papers if p.get('pdf_stored') or p['id'] in st.session_state.downloaded_pdfs]
+            if paper_ids:
+                if st.button("📦 Create ZIP", use_container_width=True):
+                    with st.spinner("Creating ZIP archive..."):
+                        zip_buffer = db_manager.create_zip_from_db(paper_ids)
+                        st.session_state.zip_buffer = zip_buffer
+                        st.success(f"ZIP created with {len(paper_ids)} PDFs")
+                
+                if st.session_state.zip_buffer:
+                    st.download_button(
+                        label="⬇️ Download ZIP",
+                        data=st.session_state.zip_buffer.getvalue(),
+                        file_name="piezoelectricity_papers.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
     
     # 2. CSV Export
     if "CSV" in export_formats:
         with export_cols[1]:
-            csv_data = db_manager.export_metadata("csv")
-            st.download_button(
-                label="📊 Download CSV",
-                data=csv_data,
-                file_name="piezoelectricity_metadata.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            csv_buffer = db_manager.export_metadata("csv")
+            if csv_buffer.getbuffer().nbytes > 0:
+                st.download_button(
+                    label="📊 CSV Export",
+                    data=csv_buffer.getvalue(),
+                    file_name="piezoelectricity_metadata.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
     
     # 3. JSON Export
     if "JSON" in export_formats:
         with export_cols[2]:
-            json_data = db_manager.export_metadata("json")
-            st.download_button(
-                label="📄 Download JSON",
-                data=json_data,
-                file_name="piezoelectricity_metadata.json",
-                mime="application/json",
-                use_container_width=True
-            )
+            json_buffer = db_manager.export_metadata("json")
+            if json_buffer.getbuffer().nbytes > 0:
+                st.download_button(
+                    label="📄 JSON Export",
+                    data=json_buffer.getvalue(),
+                    file_name="piezoelectricity_metadata.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
     
-    # 4. SQLite Backup
-    if "Backup" in export_formats:
+    # 4. Excel Export
+    if "Excel" in export_formats:
         with export_cols[3]:
-            if st.button("💾 Backup Databases", use_container_width=True):
-                with st.spinner("Creating backup..."):
-                    backup_buffer = db_manager.backup_databases()
-                    st.download_button(
-                        label="📥 Download Backup",
-                        data=backup_buffer.getvalue(),
-                        file_name="piezoelectricity_backup.zip",
-                        mime="application/zip",
-                        use_container_width=True,
-                        key="backup_download"
-                    )
+            excel_buffer = db_manager.export_metadata("excel")
+            if excel_buffer.getbuffer().nbytes > 0:
+                st.download_button(
+                    label="📈 Excel Export",
+                    data=excel_buffer.getvalue(),
+                    file_name="piezoelectricity_metadata.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
     
-    # 5. Individual Database Downloads
+    # 5. Database Download
     with export_cols[4]:
-        with st.expander("🗃️ Database Files"):
-            col_db1, col_db2, col_db3 = st.columns(3)
+        with st.expander("🗃️ Databases"):
+            db_col1, db_col2, db_col3 = st.columns(3)
             
-            with col_db1:
+            with db_col1:
                 if os.path.exists(db_manager.metadata_db):
                     with open(db_manager.metadata_db, 'rb') as f:
                         st.download_button(
                             label="Metadata DB",
                             data=f.read(),
-                            file_name="piezoelectricity_metadata.db",
+                            file_name="metadata.db",
                             mime="application/octet-stream",
                             use_container_width=True
                         )
             
-            with col_db2:
+            with db_col2:
                 if os.path.exists(db_manager.universe_db):
                     with open(db_manager.universe_db, 'rb') as f:
                         st.download_button(
-                            label="Universe DB",
+                            label="Fulltext DB",
                             data=f.read(),
-                            file_name="piezoelectricity_universe.db",
+                            file_name="fulltext.db",
                             mime="application/octet-stream",
                             use_container_width=True
                         )
             
-            with col_db3:
+            with db_col3:
                 if os.path.exists(db_manager.pdf_db):
                     with open(db_manager.pdf_db, 'rb') as f:
                         st.download_button(
                             label="PDF Storage DB",
                             data=f.read(),
-                            file_name="piezoelectricity_pdfs.db",
+                            file_name="pdf_storage.db",
                             mime="application/octet-stream",
                             use_container_width=True
                         )
-    
-    # -------------------------- DATABASE MANAGEMENT --------------------------
-    st.subheader("🗄️ Database Management")
-    
-    col_mgmt1, col_mgmt2 = st.columns(2)
-    
-    with col_mgmt1:
-        if st.button("🔄 Refresh Statistics", use_container_width=True):
-            st.session_state.db_stats = db_manager.get_db_stats()
-            st.rerun()
-    
-    with col_mgmt2:
-        if st.button("🧹 Clean Temporary Files", use_container_width=True):
-            # Clean temp directory
-            temp_dir = os.path.join(DB_DIR, "temp_pdfs")
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                os.makedirs(temp_dir, exist_ok=True)
-            st.success("Temporary files cleaned")
-    
-    # Show database info
-    with st.expander("📊 Database Information", expanded=False):
-        stats = db_manager.get_db_stats()
-        st.json(stats)
+
+# -------------------------- DATABASE MANAGEMENT --------------------------
+st.divider()
+st.subheader("🗄️ Database Management")
+
+col_stats, col_clean = st.columns(2)
+
+with col_stats:
+    if st.button("🔄 Refresh Statistics", use_container_width=True):
+        st.session_state.db_stats = db_manager.get_db_stats()
+        st.rerun()
+
+with col_clean:
+    if st.button("🧹 Clean Temporary Files", use_container_width=True):
+        # Clean temp directory
+        for temp_file in st.session_state.get('temp_files', []):
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
         
-        # Sample queries
-        st.write("**Sample Queries:**")
+        # Clear temp directory
+        temp_dir = os.path.join(DB_DIR, "temp")
+        if os.path.exists(temp_dir):
+            for file in os.listdir(temp_dir):
+                try:
+                    os.remove(os.path.join(temp_dir, file))
+                except:
+                    pass
         
-        query_col1, query_col2 = st.columns(2)
-        
-        with query_col1:
-            if st.button("Top 10 Most Relevant"):
-                conn = sqlite3.connect(db_manager.metadata_db)
-                df_top = pd.read_sql_query(
-                    "SELECT title, authors, year, relevance_prob FROM papers ORDER BY relevance_prob DESC LIMIT 10",
-                    conn
-                )
-                conn.close()
-                st.dataframe(df_top, use_container_width=True)
-        
-        with query_col2:
-            if st.button("Papers with PDFs"):
-                conn = sqlite3.connect(db_manager.metadata_db)
-                df_pdfs = pd.read_sql_query(
-                    "SELECT COUNT(*) as count, AVG(pdf_size)/1024 as avg_size_kb FROM papers WHERE has_pdf = 1",
-                    conn
-                )
-                conn.close()
-                st.metric("PDFs Stored", df_pdfs.iloc[0]['count'])
-                st.metric("Avg PDF Size", f"{df_pdfs.iloc[0]['avg_size_kb']:.1f} KB")
+        st.session_state.temp_files = []
+        st.success("Temporary files cleaned")
+
+# Show database statistics if available
+if st.session_state.db_stats:
+    with st.expander("📊 Detailed Statistics"):
+        st.json(st.session_state.db_stats)
 
 # -------------------------- FOOTER --------------------------
 st.divider()
-st.caption("""
+st.caption(f"""
 **Piezoelectricity in PVDF Research Tool** | 
-PDFs stored in SQLite databases | 
-Metadata: `piezoelectricity_metadata.db` | 
-Full Text: `piezoelectricity_universe.db` | 
-PDF Storage: `piezoelectricity_pdfs.db`
+Running on {'☁️ Streamlit Cloud' if IS_CLOUD else '💻 Local'} | 
+Data Directory: `{DB_DIR}` | 
+Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """)
 
 # Always show logs
 show_logs()
+
+# Cleanup on exit
+import atexit
+
+def cleanup():
+    """Clean up temporary files on exit"""
+    temp_dir = os.path.join(DB_DIR, "temp")
+    if os.path.exists(temp_dir):
+        for file in os.listdir(temp_dir):
+            try:
+                os.remove(os.path.join(temp_dir, file))
+            except:
+                pass
+
+atexit.register(cleanup)
