@@ -79,7 +79,7 @@ st.markdown("""
 # Directory setup
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
 RELIABILITY_DB_FILE = os.path.join(DB_DIR, "knowledge_database", "piezoelectricity_metadata.db")
-UNIVERSE_DB_FILE = os.path.join(DB_DIR, "knowledge_database", "piezoelectricity_reliability_universe.db")
+UNIVERSE_DB_FILE = os.path.join(DB_DIR, "knowledge_database", "piezoelectricity_universe.db")
 PDF_DB_FILE = os.path.join(DB_DIR, "knowledge_database", "piezoelectricity_pdfs.db")
 
 class Config:
