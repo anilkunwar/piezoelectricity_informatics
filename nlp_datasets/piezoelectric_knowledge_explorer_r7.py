@@ -18,6 +18,7 @@ import numpy as np
 import base64
 from streamlit.components.v1 import html
 import time
+import json
 
 # ==============================
 # ENVIRONMENT & PATH SETUP
@@ -180,12 +181,11 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # ==============================
-# SESSION STATE PERSISTENCE
+# SESSION STATE PERSISTENCE UTILITIES
 # ==============================
 def save_session_state():
     """Save critical session state to disk."""
     try:
-        import json
         session_data = {
             'downloaded_pdfs': {},
             'log_buffer': st.session_state.get('log_buffer', []),
@@ -202,15 +202,14 @@ def save_session_state():
         with open(SESSION_STATE_FILE, 'w') as f:
             json.dump(session_data, f)
             
-        update_log(f"Session state saved: {len(session_data['downloaded_pdfs'])} PDFs, {len(session_data['log_buffer'])} logs")
+        logging.info(f"Session state saved: {len(session_data['downloaded_pdfs'])} PDFs, {len(session_data['log_buffer'])} logs")
     except Exception as e:
-        update_log(f"Error saving session state: {e}")
+        logging.error(f"Error saving session state: {e}")
 
 def load_session_state():
     """Load session state from disk after crash/restart."""
     try:
         if SESSION_STATE_FILE.exists():
-            import json
             with open(SESSION_STATE_FILE, 'r') as f:
                 session_data = json.load(f)
             
@@ -224,27 +223,46 @@ def load_session_state():
             if session_data.get('papers_df'):
                 st.session_state.papers_df = pd.DataFrame(session_data['papers_df'])
             
-            update_log(f"Session state restored: {len(st.session_state.downloaded_pdfs)} PDFs, {len(st.session_state.log_buffer)} logs")
+            logging.info(f"Session state restored: {len(st.session_state.downloaded_pdfs)} PDFs, {len(st.session_state.log_buffer)} logs")
             return True
     except Exception as e:
-        update_log(f"Error loading session state: {e}")
+        logging.error(f"Error loading session state: {e}")
     return False
 
 def clear_session_state():
     """Clear session state and remove session file."""
-    st.session_state.downloaded_pdfs = {}
-    st.session_state.log_buffer = []
-    st.session_state.papers_df = None
-    st.session_state.search_performed = False
-    st.session_state.universe_db_updated = False
-    
+    st.session_state.clear()
     if SESSION_STATE_FILE.exists():
         SESSION_STATE_FILE.unlink()
-    
-    update_log("Session state cleared")
+    logging.info("Session state cleared")
     st.success("✅ Session state cleared successfully!")
     time.sleep(1)
     st.rerun()
+
+# ==============================
+# EARLY DEFINITION OF update_log — CRITICAL FOR INITIALIZATION
+# ==============================
+def update_log(message):
+    """Add a timestamped message to the log buffer and file. Defined early for safe use during setup."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    full_msg = f"[{timestamp}] {message}"
+    
+    # Ensure log buffer exists
+    if 'log_buffer' not in st.session_state:
+        st.session_state.log_buffer = []
+    
+    st.session_state.log_buffer.append(full_msg)
+    if len(st.session_state.log_buffer) > 100:
+        st.session_state.log_buffer.pop(0)
+    
+    logging.info(message)
+    
+    # Auto-save with protection
+    try:
+        if st.session_state.get('auto_save', True):
+            save_session_state()
+    except Exception as e:
+        logging.warning(f"Auto-save during logging failed: {e}")
 
 # ==============================
 # STREAMLIT PAGE CONFIGURATION
@@ -299,33 +317,26 @@ if IS_CLOUD:
     """)
 
 # ==============================
-# SESSION STATE INITIALIZATION
+# SESSION STATE INITIALIZATION — NOW SAFE
 # ==============================
 if "initialized" not in st.session_state:
-    # Try to load previous session state
+    st.session_state.log_buffer = []
+    
+    # Attempt to restore previous session
     if not load_session_state():
-        # Initialize fresh if no saved state
+        # Fresh session
         st.session_state.downloaded_pdfs = {}
-        st.session_state.log_buffer = []
-        st.session_state.universe_db_updated = False
         st.session_state.papers_df = None
         st.session_state.search_performed = False
+        st.session_state.universe_db_updated = False
         st.session_state.download_queued = {}
         st.session_state.auto_save = True
+        update_log("Intialized new session (no prior state)")
+    else:
+        update_log("Restored session from disk")
+    
     st.session_state.initialized = True
     update_log("Session initialized")
-
-def update_log(message):
-    """Add a timestamped message to the log buffer and file."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.log_buffer.append(f"[{timestamp}] {message}")
-    if len(st.session_state.log_buffer) > 100:  # Increased buffer size
-        st.session_state.log_buffer.pop(0)
-    logging.info(message)
-    
-    # Auto-save session state
-    if st.session_state.get('auto_save', True):
-        save_session_state()
 
 # ==============================
 # SCIBERT MODEL LOADING
@@ -364,7 +375,6 @@ except Exception as e:
 @st.cache_data(show_spinner=False)
 def normalize_text(text):
     """Normalize text by replacing Greek letters, subscripts, and superscripts."""
-    # Greek letters
     greek_to_latin = {
         'α': 'alpha', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'ε': 'epsilon',
         'Α': 'alpha', 'Β': 'beta', 'Γ': 'gamma', 'Δ': 'delta', 'Ε': 'epsilon'
@@ -372,7 +382,6 @@ def normalize_text(text):
     for greek, latin in greek_to_latin.items():
         text = text.replace(greek, latin)
     
-    # Subscripts
     subscripts = {
         '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
         '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9'
@@ -452,7 +461,6 @@ COMPILED_PATTERNS = compile_patterns()
 def score_abstract_with_scibert(abstract):
     """Score abstract relevance using SciBERT and regex pattern matching."""
     try:
-        # Tokenize and run SciBERT
         inputs = scibert_tokenizer(
             abstract,
             return_tensors="pt",
@@ -464,12 +472,10 @@ def score_abstract_with_scibert(abstract):
         with torch.no_grad():
             outputs = scibert_model(**inputs, output_attentions=True)
         
-        # Regex-based relevance
         abstract_normalized = normalize_text(abstract)
         num_matched = sum(1 for pat in COMPILED_PATTERNS if pat.search(abstract_normalized))
         relevance_prob = np.sqrt(num_matched) / np.sqrt(len(KEY_PATTERNS))
         
-        # Attention-based boost for key terms
         tokens = scibert_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
         keyword_indices = [
             i for i, token in enumerate(tokens)
@@ -579,7 +585,6 @@ def query_arxiv_api(query, categories, max_results, start_year, end_year):
             
             relevance_prob = score_abstract_with_scibert(result.summary)
             
-            # Enhanced highlighting with custom class
             abstract_highlighted = result.summary
             for term in matched_terms:
                 abstract_highlighted = re.sub(
@@ -629,20 +634,17 @@ def download_pdf_bytes(pdf_url):
 def handle_pdf_download(paper_id, pdf_url, paper_metadata):
     """Download a PDF, extract text, and update databases."""
     try:
-        # Download PDF
         pdf_bytes = download_pdf_bytes(pdf_url)
         st.session_state.downloaded_pdfs[paper_id] = pdf_bytes
         update_log(f"Downloaded PDF for {paper_id} ({len(pdf_bytes)} bytes)")
         
-        # Extract full text
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         full_text = ""
-        for page_num, page in enumerate(doc):
+        for page in doc:
             full_text += page.get_text()
         doc.close()
         update_log(f"Extracted {len(full_text)} characters from {paper_id}")
         
-        # Update universe DB
         init_universe_db()
         conn = sqlite3.connect(UNIVERSE_DB_FILE)
         cursor = conn.cursor()
@@ -659,13 +661,10 @@ def handle_pdf_download(paper_id, pdf_url, paper_metadata):
         conn.commit()
         conn.close()
         
-        # Update metadata DB with download flag
         init_metadata_db()
         conn = sqlite3.connect(METADATA_DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE papers SET downloaded = 1 WHERE id = ?
-        """, (paper_id,))
+        cursor.execute("UPDATE papers SET downloaded = 1 WHERE id = ?", (paper_id,))
         conn.commit()
         conn.close()
         
@@ -711,7 +710,6 @@ def download_manager():
     
     col1, col2, col3, col4 = st.columns(4)
     
-    # ZIP of PDFs
     with col1:
         if st.session_state.downloaded_pdfs:
             zip_data = create_zip_of_downloaded_pdfs()
@@ -728,7 +726,6 @@ def download_manager():
         else:
             st.button("📦 All PDFs (ZIP)", disabled=True, help="No PDFs downloaded", use_container_width=True)
     
-    # Metadata DB
     with col2:
         metadata_bytes = get_db_as_bytes(METADATA_DB_FILE)
         if metadata_bytes:
@@ -745,7 +742,6 @@ def download_manager():
         else:
             st.button("🗃️ Metadata DB", disabled=True, help="Search first", use_container_width=True)
     
-    # Universe DB
     with col3:
         universe_bytes = get_db_as_bytes(UNIVERSE_DB_FILE)
         if universe_bytes and st.session_state.universe_db_updated:
@@ -762,14 +758,12 @@ def download_manager():
         else:
             st.button("🔍 Full-Text DB", disabled=True, help="Download PDFs first", use_container_width=True)
     
-    # Session State
     with col4:
         session_data = {
             'downloaded_pdfs_count': len(st.session_state.downloaded_pdfs),
             'search_performed': st.session_state.search_performed,
             'last_update': datetime.now().isoformat()
         }
-        import json
         session_json = json.dumps(session_data, indent=2)
         st.download_button(
             label="💾 Session Info",
@@ -796,7 +790,6 @@ def inspect_metadata_db():
     
     st.subheader("🗃️ Metadata Database")
     
-    # Metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Papers", len(df))
@@ -818,13 +811,8 @@ def inspect_universe_db():
         st.warning("Full-text database not available. Download at least one PDF first.")
         return
     
-    conn = sqlite3.connect(UNIVERSE_DB_FILE)
-    df = pd.read_sql("SELECT id, title, authors, year, download_time FROM papers", conn)
-    conn.close()
-    
     st.subheader("🔍 Full-Text Database")
     
-    # Search functionality
     search_term = st.text_input("🔎 Search in full text:", key="universe_search")
     if search_term:
         conn = sqlite3.connect(UNIVERSE_DB_FILE)
@@ -846,6 +834,9 @@ def inspect_universe_db():
         else:
             st.info("No matches found.")
     
+    conn = sqlite3.connect(UNIVERSE_DB_FILE)
+    df = pd.read_sql("SELECT id, title, authors, year, download_time FROM papers", conn)
+    conn.close()
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 # ==============================
@@ -859,7 +850,6 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    # Query mode
     query_mode = st.radio("**Query Mode**", ["Auto (Recommended)", "Custom"], horizontal=True)
     if query_mode == "Auto":
         query = ' OR '.join([f'"{term}"' for term in KEY_TERMS[:10]])
@@ -867,7 +857,6 @@ with st.sidebar:
     else:
         query = st.text_area("**Custom Query**", value=' OR '.join([f'"{term}"' for term in KEY_TERMS[:5]]), height=100)
     
-    # Categories
     default_categories = ["cond-mat.mtrl-sci", "physics.app-ph", "physics.chem-ph"]
     categories = st.multiselect(
         "**arXiv Categories**",
@@ -876,7 +865,6 @@ with st.sidebar:
         help="Select at least one category"
     )
     
-    # Limits
     max_results = st.slider("**Max Results**", min_value=1, max_value=200, value=30)
     current_year = datetime.now().year
     col1, col2 = st.columns(2)
@@ -885,7 +873,6 @@ with st.sidebar:
     with col2:
         end_year = st.number_input("**End Year**", min_value=start_year, max_value=current_year, value=current_year)
     
-    # Action buttons
     col1, col2 = st.columns(2)
     with col1:
         search_button = st.button("🚀 Execute Search", type="primary", use_container_width=True)
@@ -895,17 +882,15 @@ with st.sidebar:
     if clear_button:
         clear_session_state()
     
-    # Session info
     st.markdown("---")
     st.markdown("### 💾 Session Info")
     st.metric("PDFs Downloaded", len(st.session_state.downloaded_pdfs))
     st.metric("Log Entries", len(st.session_state.log_buffer))
     
-    # Auto-save toggle
     st.session_state.auto_save = st.toggle("Auto-save session", value=True)
 
 # ==============================
-# MAIN APPLICATION
+# MAIN APPLICATION LOGIC
 # ==============================
 if search_button:
     if not categories:
@@ -920,7 +905,6 @@ if search_button:
         if not papers:
             st.warning("📭 No papers found. Try broadening your query or categories.")
         else:
-            # Display metrics
             relevant_papers = [p for p in papers if p["relevance_prob"] > 30.0]
             st.success(f"""
             ✅ Found **{len(relevant_papers)}** relevant papers (relevance > 30%)
@@ -934,7 +918,6 @@ if search_button:
                 df = pd.DataFrame(relevant_papers)
                 st.session_state.papers_df = df
                 
-                # Save to metadata DB
                 init_metadata_db()
                 conn = sqlite3.connect(METADATA_DB_FILE)
                 df_to_save = df.drop(columns=["abstract_highlighted", "downloaded"], errors='ignore')
@@ -942,7 +925,6 @@ if search_button:
                 conn.close()
                 update_log(f"Saved {len(df)} papers to metadata DB")
                 
-                # Display papers with enhanced UI
                 st.subheader("📚 Relevant Papers")
                 
                 for idx, paper in df.iterrows():
@@ -961,7 +943,6 @@ if search_button:
                         st.markdown("### Abstract")
                         st.markdown(paper["abstract_highlighted"], unsafe_allow_html=True)
                         
-                        # Action buttons
                         col_dl, col_view, col_save = st.columns(3)
                         with col_dl:
                             if st.button("📥 Download & Index", key=f"dl_{paper['id']}", use_container_width=True):
@@ -1009,7 +990,6 @@ if st.session_state.search_performed or st.session_state.downloaded_pdfs:
 st.markdown("---")
 st.subheader("📝 Activity Log")
 
-# Log controls
 col1, col2 = st.columns([3, 1])
 with col1:
     log_display = st.select_slider(
@@ -1022,27 +1002,23 @@ with col2:
         st.session_state.log_buffer = []
         st.rerun()
 
-# Display logs with auto-scroll
 log_container = st.container()
 with log_container:
     logs_to_show = st.session_state.log_buffer[-log_display:] if st.session_state.log_buffer else ["No logs yet"]
     log_text = "\n".join(logs_to_show)
     st.text_area("", value=log_text, height=200, label_visibility="collapsed", key="log_display")
 
-# Save session state periodically
+# Final auto-save
 if st.session_state.get('auto_save', True):
     save_session_state()
 
 # Footer
 st.markdown("---")
-st.markdown("""
+st.markdown(f"""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem; padding: 1rem;">
     <p>🔬 <strong>Piezoelectricity in PVDF Knowledge Explorer</strong> | 
-    Session persisted: <strong>{}</strong> | 
-    PDFs stored: <strong>{}</strong></p>
+    Session persisted: <strong>{"✅" if st.session_state.auto_save else "❌"}</strong> | 
+    PDFs stored: <strong>{len(st.session_state.downloaded_pdfs)}</strong></p>
     <p style="opacity: 0.7;">Data is automatically saved. Use download buttons to export files.</p>
 </div>
-""".format(
-    "✅" if st.session_state.auto_save else "❌",
-    len(st.session_state.downloaded_pdfs)
-), unsafe_allow_html=True)
+""", unsafe_allow_html=True)
