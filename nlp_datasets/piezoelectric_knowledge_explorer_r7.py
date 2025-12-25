@@ -181,13 +181,22 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # ==============================
-# SESSION STATE PERSISTENCE UTILITIES
+# SESSION STATE PERSISTENCE UTILITIES — FIXED FOR BINARY DATA
 # ==============================
 def save_session_state():
-    """Save critical session state to disk."""
+    """Save critical session state to disk, encoding PDF bytes as base64."""
     try:
+        # Encode PDF bytes to base64 strings for JSON serialization
+        downloaded_pdfs_b64 = {}
+        for paper_id, pdf_bytes in st.session_state.get('downloaded_pdfs', {}).items():
+            if isinstance(pdf_bytes, bytes):
+                downloaded_pdfs_b64[paper_id] = base64.b64encode(pdf_bytes).decode('utf-8')
+            else:
+                # In case of unexpected type, skip
+                logging.warning(f"Skipping non-bytes PDF for {paper_id}")
+        
         session_data = {
-            'downloaded_pdfs': {},
+            'downloaded_pdfs_b64': downloaded_pdfs_b64,
             'log_buffer': st.session_state.get('log_buffer', []),
             'papers_df': st.session_state.get('papers_df', None),
             'search_performed': st.session_state.get('search_performed', False),
@@ -202,19 +211,27 @@ def save_session_state():
         with open(SESSION_STATE_FILE, 'w') as f:
             json.dump(session_data, f)
             
-        logging.info(f"Session state saved: {len(session_data['downloaded_pdfs'])} PDFs, {len(session_data['log_buffer'])} logs")
+        logging.info(f"Session state saved: {len(downloaded_pdfs_b64)} PDFs, {len(session_data['log_buffer'])} logs")
     except Exception as e:
         logging.error(f"Error saving session state: {e}")
 
 def load_session_state():
-    """Load session state from disk after crash/restart."""
+    """Load session state from disk after crash/restart, decoding base64 PDFs."""
     try:
         if SESSION_STATE_FILE.exists():
             with open(SESSION_STATE_FILE, 'r') as f:
                 session_data = json.load(f)
             
-            # Restore session state
-            st.session_state.downloaded_pdfs = session_data.get('downloaded_pdfs', {})
+            # Decode base64 PDFs back to bytes
+            downloaded_pdfs = {}
+            for paper_id, b64_str in session_data.get('downloaded_pdfs_b64', {}).items():
+                try:
+                    pdf_bytes = base64.b64decode(b64_str)
+                    downloaded_pdfs[paper_id] = pdf_bytes
+                except Exception as e:
+                    logging.warning(f"Failed to decode PDF {paper_id}: {e}")
+            
+            st.session_state.downloaded_pdfs = downloaded_pdfs
             st.session_state.log_buffer = session_data.get('log_buffer', [])
             st.session_state.search_performed = session_data.get('search_performed', False)
             st.session_state.universe_db_updated = session_data.get('universe_db_updated', False)
