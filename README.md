@@ -12,14 +12,21 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction5-streamlit-red)](https://piezoelectricity-knowledge-explorer5.streamlit.app/) (Type B)
 
-[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction6-streamlit-red)](https://piezoelectricity-knowledge-explorer6.streamlit.app/) (Type B)
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction6-streamlit-red)](https://piezoelectricity-knowledge-explorer6.streamlit.app/) (Type B, Robust)
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction7-streamlit-red)](https://piezoelectricity-knowledge-explorer7.streamlit.app/)  (Type A)
 
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction8-streamlit-red)](https://piezoelectricity-knowledge-explorer8.streamlit.app/)  (Type A)
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction9-streamlit-red)](https://piezoelectricity-knowledge-explorer9.streamlit.app/)  (Type A, Working)
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction10-streamlit-red)](https://piezoelectricity-knowledge-explorer10.streamlit.app/) (Type B, Robust, Advanced r6)
 
 # Data Visualization and Quantitative NER
 
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner1-streamlit-red)](https://piezoelectricity-wordgraph-ner1.streamlit.app/)
 
-[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner1-streamlit-red)](https://piezoelectricity-wordgraph-ner1.streamlit.app/)  (working)
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner2-streamlit-red)](https://piezoelectricity-wordgraph-ner2.streamlit.app/)  (working)
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner3-streamlit-red)](https://piezoelectricity-wordgraph-ner3.streamlit.app/)  (working, conceptualization of generative model)
