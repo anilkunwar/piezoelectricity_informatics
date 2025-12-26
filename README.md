@@ -22,6 +22,13 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction10-streamlit-red)](https://piezoelectricity-knowledge-explorer10.streamlit.app/) (Type B, Robust, Advanced r6)
 
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction11-streamlit-red)](https://piezoelectricity-knowledge-explorer11.streamlit.app/) (Type B, Robust, Advanced r6)
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction12-streamlit-red)](https://piezoelectricity-knowledge-explorer12.streamlit.app/) (Type B, Robust, Advanced r6, Smart Query can be Given to the ML model)
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction13-streamlit-red)](https://piezoelectricity-knowledge-explorer13.streamlit.app/) (Type B, Robust, Advanced r6, Smart Query can be Given to the ML model, Enhanced Features for Database Processing)
+
+
 # Data Visualization and Quantitative NER
 
 
@@ -30,3 +37,6 @@ Text based data extraction from web using attention mechanism
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner2-streamlit-red)](https://piezoelectricity-wordgraph-ner2.streamlit.app/)  (working)
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner3-streamlit-red)](https://piezoelectricity-wordgraph-ner3.streamlit.app/)  (working, conceptualization of generative model)
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner4-streamlit-red)](https://piezoelectricity-wordgraph-ner4.streamlit.app/)  (working, conceptualization of generative model, numba acceleration)
+
