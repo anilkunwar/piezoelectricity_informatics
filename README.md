@@ -40,3 +40,7 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezokgner4-streamlit-red)](https://piezoelectricity-wordgraph-ner4.streamlit.app/)  (working, conceptualization of generative model, numba acceleration)
 
+
+# Wordcloud 
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezowc1-streamlit-red)](https://piezoelectricity-wordcloud1.streamlit.app/)  
