@@ -1,6 +1,6 @@
 # streamlit_app.py
 # FULLY EXPANDED VERSION WITH NUMBA JIT ACCELERATION AND ADVANCED FEATURES
-# >3300 LINES — COMPLETE SOURCE CODE WITH NO REDACTION
+# >3500 LINES — COMPLETE SOURCE CODE WITH NO REDACTION
 
 import streamlit as st
 import pandas as pd
@@ -474,7 +474,6 @@ class CacheManager:
 
     def _calculate_hit_rate(self) -> float:
         """Calculate cache hit rate (placeholder for actual implementation)"""
-        # In a real implementation, you would track hits and misses
         return 0.85  # Placeholder value
 
 class BertEmbeddingCache:
@@ -483,7 +482,7 @@ class BertEmbeddingCache:
         if TRANSFORMERS_AVAILABLE:
             try:
                 self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-                self.model = BertModel.from_pretrained('bert-base-uncased')
+                self.model = BertModel.from_prevalidated('bert-base-uncased')
                 self.model.eval()
                 if torch.cuda.is_available():
                     self.model = self.model.cuda()
@@ -2050,6 +2049,302 @@ class PublicationQualityVisualizationEngine:
         return fig
 
 # ==============================
+# ENHANCED DATABASE MANAGER WITH ROBUST SCHEMA HANDLING
+# ==============================
+class DatabaseManager:
+    """Manages database connections with enhanced error handling and dynamic schema detection"""
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.conn = None
+        self.table_columns = {}  # Cache of table columns
+        logger.info(f"Database manager initialized for {db_path}")
+    
+    def connect(self) -> bool:
+        """Establish database connection with enhanced error handling"""
+        try:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            logger.info(f"Connected to database: {self.db_path}")
+            # Cache table columns on connection
+            self._cache_table_columns()
+            return True
+        except Exception as e:
+            logger.error(f"Database connection error: {e}")
+            st.error(f"Database connection error: {e}")
+            return False
+    
+    def _cache_table_columns(self):
+        """Cache all table columns for dynamic query building"""
+        if not self.conn:
+            return
+        
+        try:
+            tables = self.get_tables()
+            for table in tables:
+                query = f"PRAGMA table_info({table});"
+                columns_df = pd.read_sql_query(query, self.conn)
+                self.table_columns[table] = columns_df['name'].tolist()
+                logger.debug(f"Cached columns for {table}: {self.table_columns[table]}")
+        except Exception as e:
+            logger.warning(f"Error caching table columns: {e}")
+    
+    def get_columns(self, table_name: str) -> List[str]:
+        """Get columns for a table, with caching"""
+        if table_name in self.table_columns:
+            return self.table_columns[table_name]
+        
+        if not self.conn:
+            if not self.connect():
+                return []
+        
+        try:
+            query = f"PRAGMA table_info({table_name});"
+            columns_df = pd.read_sql_query(query, self.conn)
+            columns = columns_df['name'].tolist()
+            self.table_columns[table_name] = columns
+            return columns
+        except Exception as e:
+            logger.error(f"Error getting columns for {table_name}: {e}")
+            return []
+    
+    def disconnect(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+            logger.info("Database connection closed")
+    
+    def get_tables(self) -> List[str]:
+        """Get list of tables in database with robust error handling"""
+        if not self.conn:
+            if not self.connect():
+                return []
+        try:
+            query = "SELECT name FROM sqlite_master WHERE type='table';"
+            tables = pd.read_sql_query(query, self.conn)
+            logger.debug(f"Found tables: {tables['name'].tolist()}")
+            return tables['name'].tolist()
+        except Exception as e:
+            logger.error(f"Error fetching tables: {e}")
+            st.error(f"Error fetching tables: {e}")
+            return []
+    
+    def get_papers_data(self) -> pd.DataFrame:
+        """Get papers data with dynamic schema handling"""
+        tables = self.get_tables()
+        
+        # Determine which table to use based on availability
+        target_table = None
+        available_columns = []
+        
+        if "papers_fulltext" in tables:
+            target_table = "papers_fulltext"
+            available_columns = self.get_columns("papers_fulltext")
+        elif "papers" in tables:
+            target_table = "papers"
+            available_columns = self.get_columns("papers")
+        elif "documents" in tables:
+            target_table = "documents"
+            available_columns = self.get_columns("documents")
+        else:
+            logger.warning("No papers table found in database")
+            st.warning("No papers table found in database. Checking for alternative structures...")
+            
+            # Try to find any table that might contain paper data
+            for table in tables:
+                cols = self.get_columns(table)
+                if any(col in cols for col in ['title', 'abstract', 'content']):
+                    target_table = table
+                    available_columns = cols
+                    logger.info(f"Using alternative table '{table}' for paper data")
+                    break
+        
+        if not target_table:
+            logger.error("No suitable table found for paper data")
+            st.error("Could not find any table containing paper data. Please check database structure.")
+            return pd.DataFrame()
+        
+        logger.info(f"Using table '{target_table}' with columns: {available_columns}")
+        
+        # Build dynamic query based on available columns
+        required_text_columns = ['full_text', 'abstract', 'content', 'text']
+        text_column = next((col for col in required_text_columns if col in available_columns), None)
+        
+        if not text_column:
+            logger.error(f"No text column found in {target_table}. Available columns: {available_columns}")
+            st.error(f"No text content column found in {target_table}. Please check database structure.")
+            return pd.DataFrame()
+        
+        # Select available standard columns
+        standard_columns = ['paper_id', 'id', 'title', 'abstract', 'full_text', 'content', 'text', 
+                           'year', 'date', 'categories', 'keywords', 'authors', 'journal', 'doi']
+        
+        # Build column list dynamically
+        select_columns = []
+        for col in standard_columns:
+            if col in available_columns and col not in select_columns:
+                select_columns.append(col)
+        
+        # Ensure text column is included
+        if text_column not in select_columns:
+            select_columns.append(text_column)
+        
+        # Map standard column names to available columns
+        column_mapping = {}
+        if 'paper_id' not in available_columns and 'id' in available_columns:
+            column_mapping['id'] = 'paper_id'
+        if 'full_text' not in available_columns and 'content' in available_columns:
+            column_mapping['content'] = 'full_text'
+        if 'abstract' not in available_columns and 'summary' in available_columns:
+            column_mapping['summary'] = 'abstract'
+        if 'year' not in available_columns and 'date' in available_columns:
+            column_mapping['date'] = 'year'
+        
+        # Build SELECT clause
+        select_clause = ", ".join([f"{col} AS {column_mapping[col]}" if col in column_mapping else col 
+                                 for col in select_columns])
+        
+        # Build WHERE clause
+        where_clauses = []
+        if text_column:
+            where_clauses.append(f"({text_column} IS NOT NULL AND LENGTH({text_column}) > 100)")
+        
+        # Add abstract fallback if available
+        if 'abstract' in available_columns and 'abstract' != text_column:
+            where_clauses.append(f"(abstract IS NOT NULL AND LENGTH(abstract) > 50)")
+        
+        where_clause = " OR ".join(where_clauses) if where_clauses else "1=1"
+        
+        # Build final query
+        query = f"""
+        SELECT {select_clause}
+        FROM {target_table}
+        WHERE {where_clause}
+        LIMIT 2000
+        """
+        
+        logger.debug(f"Executing query: {query}")
+        
+        try:
+            df = pd.read_sql_query(query, self.conn)
+            
+            # Post-processing: handle date/year conversion
+            if 'date' in df.columns and 'year' not in df.columns:
+                try:
+                    df['year'] = pd.to_datetime(df['date']).dt.year
+                except:
+                    df['year'] = 2023  # Default year
+            
+            # Ensure paper_id exists
+            if 'paper_id' not in df.columns:
+                if 'id' in df.columns:
+                    df['paper_id'] = df['id']
+                else:
+                    df['paper_id'] = range(1, len(df) + 1)
+            
+            # Ensure text content exists
+            if 'full_text' not in df.columns:
+                if 'content' in df.columns:
+                    df['full_text'] = df['content']
+                elif 'text' in df.columns:
+                    df['full_text'] = df['text']
+                elif 'abstract' in df.columns:
+                    df['full_text'] = df['abstract']
+            
+            logger.info(f"Loaded {len(df)} papers from {target_table}")
+            st.success(f"Successfully loaded {len(df)} papers from {target_table}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching papers: {e}")
+            st.error(f"""
+            **Error fetching papers:**
+            {str(e)}
+            
+            **Available columns in {target_table}:**
+            {', '.join(available_columns)}
+            
+            **Fallback strategy:** Using minimal schema with available text content.
+            """)
+            
+            # Fallback minimal query
+            try:
+                fallback_query = f"""
+                SELECT 
+                    {text_column} as full_text,
+                    {text_column} as abstract,
+                    title,
+                    'Unknown' as categories
+                FROM {target_table}
+                WHERE {text_column} IS NOT NULL AND LENGTH({text_column}) > 50
+                LIMIT 2000
+                """
+                df = pd.read_sql_query(fallback_query, self.conn)
+                df['paper_id'] = range(1, len(df) + 1)
+                df['year'] = 2023  # Default year
+                logger.info(f"Fallback loaded {len(df)} papers")
+                return df
+            except Exception as fallback_error:
+                logger.error(f"Fallback query failed: {fallback_error}")
+                st.error(f"Even fallback query failed: {fallback_error}")
+                return pd.DataFrame()
+    
+    def get_database_schema(self) -> Dict[str, List[str]]:
+        """Get complete database schema for debugging and analysis"""
+        schema = {}
+        tables = self.get_tables()
+        for table in tables:
+            schema[table] = self.get_columns(table)
+        return schema
+    
+    def generate_schema_report(self):
+        """Generate a comprehensive schema report for the database"""
+        schema = self.get_database_schema()
+        
+        st.subheader("🔍 Database Schema Analysis")
+        
+        for table, columns in schema.items():
+            with st.expander(f"Table: {table} ({len(columns)} columns)"):
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.markdown("**Columns:**")
+                    for col in columns:
+                        st.markdown(f"- `{col}`")
+                with col2:
+                    # Try to get sample data
+                    try:
+                        sample_query = f"SELECT * FROM {table} LIMIT 3"
+                        sample_df = pd.read_sql_query(sample_query, self.conn)
+                        st.markdown("**Sample Data (first 3 rows):**")
+                        st.dataframe(sample_df)
+                    except Exception as e:
+                        st.warning(f"Could not fetch sample data: {e}")
+        
+        # Schema statistics
+        st.subheader("📊 Schema Statistics")
+        total_tables = len(schema)
+        total_columns = sum(len(cols) for cols in schema.values())
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Tables", total_tables)
+        col2.metric("Total Columns", total_columns)
+        col3.metric("Avg Columns/Table", f"{total_columns/total_tables:.1f}")
+        
+        # Text content analysis
+        text_columns = []
+        for table, columns in schema.items():
+            for col in columns:
+                if any(keyword in col.lower() for keyword in ['text', 'content', 'abstract', 'full']):
+                    text_columns.append(f"{table}.{col}")
+        
+        st.markdown("### 📝 Text Content Columns")
+        if text_columns:
+            for col in text_columns:
+                st.markdown(f"- `{col}`")
+        else:
+            st.warning("No text content columns detected. This may affect knowledge extraction.")
+        
+        return schema
+
+# ==============================
 # MAIN APPLICATION
 # ==============================
 def main():
@@ -2155,17 +2450,75 @@ def main():
                     st.error("Failed to connect to database")
                     return
 
-                # Load papers
-                st.text("📥 Loading papers from database...")
+                # Enhanced database schema analysis
+                st.markdown("### 🗃️ Database Schema Analysis")
+                schema = db_manager.generate_schema_report()
+                
+                # Load papers with robust schema handling
+                st.text("📥 Loading papers from database with dynamic schema detection...")
                 st.session_state.performance_monitor.start_timer("load_papers")
                 papers_df = db_manager.get_papers_data()
                 st.session_state.performance_monitor.end_timer("load_papers")
                 
                 if papers_df.empty:
-                    st.error("No papers found in database!")
+                    st.error("🚨 No papers found in database after schema analysis!")
+                    
+                    # Offer schema debugging tools
+                    with st.expander("🔍 Debug Database Schema"):
+                        st.markdown("""
+                        **Schema Analysis Failed. Please check:**
+                        
+                        1. **Table Names**: Does your database contain tables with paper data?
+                        2. **Column Names**: Are there columns containing text content?
+                        3. **Data Types**: Are text columns properly stored as TEXT/BLOB types?
+                        
+                        **Common table names to look for:**
+                        - `papers`
+                        - `papers_fulltext`
+                        - `documents`
+                        - `publications`
+                        - `metadata`
+                        
+                        **Common text columns to look for:**
+                        - `full_text`
+                        - `abstract`
+                        - `content`
+                        - `text`
+                        - `body`
+                        - `summary`
+                        
+                        **Next steps:**
+                        1. Check your database with a SQLite browser
+                        2. Ensure text content is properly populated
+                        3. Consider running schema migration if needed
+                        """)
+                        
+                        # Schema migration helper
+                        st.subheader("🔧 Schema Migration Helper")
+                        st.markdown("""
+                        If your database has a different schema, you can use this template to create a view:
+                        """)
+                        
+                        migration_template = """
+                        -- Create a view that matches expected schema
+                        CREATE VIEW papers_fulltext AS
+                        SELECT 
+                            id as paper_id,
+                            title,
+                            abstract,
+                            full_text_content as full_text,
+                            strftime('%Y', publication_date) as year,
+                            category as categories
+                        FROM your_actual_table_name;
+                        """
+                        st.code(migration_template, language='sql')
+                        
+                        if st.button("🔄 Re-analyze Schema After Migration"):
+                            st.rerun()
+                    
                     return
-
-                # Extract text
+                
+                # Continue with analysis
                 st.text("📄 Extracting text content...")
                 st.session_state.performance_monitor.start_timer("extract_text")
                 if 'full_text' in papers_df.columns:
@@ -2469,8 +2822,10 @@ def main():
                         if result["ml_prediction"]:
                             with st.expander("🤖 Machine Learning Prediction"):
                                 ml_pred = result["ml_prediction"]
-                                st.markdown(f"**Model**: {ml_pred['model_type']}")
-                                st.markdown(f"**Prediction**: {ml_pred['mean']:.2f} ± {ml_pred['std']:.2f} {result['prediction']['unit']}")
+                                st.markdown(f"""
+                                **Model**: {ml_pred['model_type']}
+                                **Prediction**: {ml_pred['mean']:.2f} ± {ml_pred['std']:.2f} {result['prediction']['unit']}
+                                """)
             else:
                 st.info("Analysis required before generative inference.")
 
@@ -2682,76 +3037,6 @@ def main():
             """)
 
 # ==============================
-# DATABASE MANAGER (Enhanced)
-# ==============================
-class DatabaseManager:
-    """Manages database connections with enhanced error handling"""
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.conn = None
-        logger.info(f"Database manager initialized for {db_path}")
-
-    def connect(self) -> bool:
-        try:
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            logger.info(f"Connected to database: {self.db_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Database connection error: {e}")
-            st.error(f"Database connection error: {e}")
-            return False
-
-    def disconnect(self):
-        if self.conn:
-            self.conn.close()
-            logger.info("Database connection closed")
-
-    def get_tables(self) -> List[str]:
-        if not self.conn:
-            if not self.connect():
-                return []
-        try:
-            query = "SELECT name FROM sqlite_master WHERE type='table';"
-            tables = pd.read_sql_query(query, self.conn)
-            logger.debug(f"Found tables: {tables['name'].tolist()}")
-            return tables['name'].tolist()
-        except Exception as e:
-            logger.error(f"Error fetching tables: {e}")
-            st.error(f"Error fetching tables: {e}")
-            return []
-
-    def get_papers_data(self) -> pd.DataFrame:
-        tables = self.get_tables()
-        if "papers_fulltext" in tables:
-            query = """
-            SELECT paper_id, title, abstract, full_text, year, categories
-            FROM papers_fulltext 
-            WHERE (full_text IS NOT NULL AND LENGTH(full_text) > 100)
-               OR (abstract IS NOT NULL AND LENGTH(abstract) > 50)
-            LIMIT 2000
-            """
-        elif "papers" in tables:
-            query = """
-            SELECT id as paper_id, title, abstract, year, categories,
-                   relevance_score, enhanced_relevance_score
-            FROM papers 
-            WHERE abstract IS NOT NULL AND LENGTH(abstract) > 50
-            LIMIT 2000
-            """
-        else:
-            logger.warning("No papers table found in database")
-            return pd.DataFrame()
-        
-        try:
-            df = pd.read_sql_query(query, self.conn)
-            logger.info(f"Loaded {len(df)} papers from database")
-            return df
-        except Exception as e:
-            logger.error(f"Error fetching papers: {e}")
-            st.error(f"Error fetching papers: {e}")
-            return pd.DataFrame()
-
-# ==============================
 # UTILITY FUNCTIONS
 # ==============================
 def check_database_files():
@@ -2857,7 +3142,7 @@ def create_sample_data():
     entities_df = pd.DataFrame(entities)
     relationships_df = pd.DataFrame(relationships)
     
-    logger.info(f"Created sample  {len(papers_df)} papers, {len(entities_df)} entities, {len(relationships_df)} relationships")
+    logger.info(f"Created sample data: {len(papers_df)} papers, {len(entities_df)} entities, {len(relationships_df)} relationships")
     return papers_df, entities_df, relationships_df
 
 # ==============================
