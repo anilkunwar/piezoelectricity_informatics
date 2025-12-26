@@ -2462,10 +2462,8 @@ def main():
                         if result["ml_prediction"]:
                             with st.expander("🤖 Machine Learning Prediction"):
                                 ml_pred = result["ml_prediction"]
-                                st.markdown(f"""
-                                **Model**: {ml_pred['model_type']}
-                                **Prediction**: {ml_pred['mean']:.2f} ± {ml_pred['std']:.2f} {result['prediction']['unit']}
-                                """")
+                                st.markdown(f""" **Model**: {ml_pred['model_type']}**Prediction**: {ml_pred['mean']:.2f} ± {ml_pred['std']:.2f} {result['prediction']['unit']}
+                                		"""")
             else:
                 st.info("Analysis required before generative inference.")
 
