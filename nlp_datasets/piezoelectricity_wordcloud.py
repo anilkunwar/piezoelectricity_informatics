@@ -1,4 +1,4 @@
-# streamlit_app.py — FOCUSED WORDCLOUD MODE
+# streamlit_app.py — CATEGORICAL WORD CLOUD (PVDF / Dopants / Properties)
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -10,9 +10,8 @@ import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 import logging
 
-# Setup
 logging.basicConfig(level=logging.INFO)
-st.set_page_config(page_title="Piezoelectric Word Cloud Miner", layout="wide")
+st.set_page_config(page_title="Categorical Piezoelectric Word Cloud", layout="wide")
 
 st.markdown("""
 <style>
@@ -24,7 +23,56 @@ st.markdown("""
 def add_caption(text: str):
     st.markdown(f'<div class="figure-caption">{text}</div>', unsafe_allow_html=True)
 
-# Helper: get DB paths by query type
+# === CATEGORICAL LEXICONS ===
+PVDF_TERMS = {
+    'pvdf', 'polyvinylidene', 'poly(vinylidene', 'polyvinylidenefluoride', 'polyvinylidene fluoride',
+    'polymer', 'copolymer', 'homopolymer', 'flexible', 'film', 'electrospun', 'nanofiber',
+    'β-phase', 'beta phase', 'beta-phase', 'alpha phase', 'gamma phase', 'crystalline',
+    'amorphous', 'poling', 'stretching', 'annealing', 'quenching', 'solution casting',
+    'melt processing', 'phase transformation', 'dipole', 'ferroelectric', 'piezopolymer'
+}
+
+DOPANT_TERMS = {
+    # Common fillers/dopants in PVDF composites
+    'zno', 'tio2', 'sno2', 'batio3', 'cnt', 'carbon nanotube', 'graphene', 'rgo',
+    'mxene', 'bnt', 'bt', 'pzt', 'aln', 'mgo', 'sro', 'caco3', 'sic', 'bn', 'mofs',
+    'cellulose', 'clay', 'talc', 'nanoclay', 'tio', 'zro2', 'fe3o4', 'nio', 'cofe2o4',
+    'ba0.85ca0.15zr0.1ti0.9o3', 'bczt', 'pmn-pt', 'knn', 'linbo3', 'nbt', 'bt-bzt'
+}
+
+PROPERTY_TERMS = {
+    'd33', 'd31', 'g33', 'voltage', 'current', 'power', 'energy', 'density', 'output',
+    'dielectric', 'permittivity', 'capacitance', 'impedance', 'resistance', 'conductivity',
+    'young', 'modulus', 'stiffness', 'elastic', 'tensile', 'strength', 'strain',
+    'curie', 'temperature', 'tc', 'coercive', 'remanent', 'polarization', 'hysteresis',
+    'electromechanical', 'coupling', 'quality factor', 'mechanical', 'loss', 'tan delta',
+    'bandgap', 'band gap', 'crystallinity', 'crystalline', 'beta content', 'phase fraction'
+}
+
+STOPWORDS = {
+    'using', 'used', 'study', 'result', 'show', 'figure', 'table', 'high', 'low',
+    'obtained', 'reported', 'demonstrated', 'exhibited', 'fabricated', 'prepared',
+    'investigated', 'characterized', 'measured', 'synthesized', 'paper', 'method',
+    'based', 'respectively', 'within', 'between', 'under', 'via', 'through', 'during',
+    'after', 'before', 'from', 'into', 'over', 'with', 'without', 'than', 'that',
+    'which', 'this', 'these', 'those', 'also', 'further', 'more', 'most', 'such',
+    'well', 'very', 'much', 'many', 'each', 'every', 'both', 'either', 'neither'
+}
+
+# Normalize all lexicons to lowercase
+PVDF_TERMS = {t.lower() for t in PVDF_TERMS}
+DOPANT_TERMS = {t.lower() for t in DOPANT_TERMS}
+PROPERTY_TERMS = {t.lower() for t in PROPERTY_TERMS}
+STOPWORDS = {t.lower() for t in STOPWORDS}
+
+# Color mapping
+CATEGORY_COLORS = {
+    'pvdf': '#3B82F6',      # Blue
+    'dopant': '#EF4444',    # Red
+    'property': '#10B981',  # Green
+    'other': '#6B7280'      # Gray
+}
+
 def get_db_paths_for_query(query_type: str) -> dict:
     base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge_database")
     return {
@@ -33,26 +81,33 @@ def get_db_paths_for_query(query_type: str) -> dict:
         "PDF Storage DB": os.path.join(base_dir, f"piezoelectricity{query_type}_pdfs.db")
     }
 
-# Helper: extract terms for word cloud (unigrams + bigrams)
-def extract_terms_for_wordcloud(texts: list, ngram_range=(1, 2)) -> dict:
+def extract_terms_for_wordcloud(texts: list) -> Counter:
     combined = " ".join(str(t).lower() for t in texts if pd.notna(t))
     combined = re.sub(r'[^a-z0-9\s\-]', ' ', combined)
-    words = [w for w in combined.split() if len(w) > 2 and not w.isdigit()]
+    words = [w for w in combined.split() if len(w) > 2 and not w.isdigit() and w not in STOPWORDS]
     terms = []
 
-    if ngram_range[0] <= 1:
-        terms.extend(words)
-    if ngram_range[1] >= 2:
-        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words)-1)]
-        terms.extend(bigrams)
+    # Unigrams
+    terms.extend(words)
+    # Bigrams
+    bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words)-1)]
+    terms.extend(bigrams)
 
     return Counter(terms)
 
-# Main app
-def main():
-    st.markdown('<h1 class="main-header">☁️ Piezoelectric Literature Word Cloud Miner</h1>', unsafe_allow_html=True)
+def categorize_term(term: str) -> str:
+    t = term.lower()
+    if t in PVDF_TERMS:
+        return 'pvdf'
+    if t in DOPANT_TERMS:
+        return 'dopant'
+    if t in PROPERTY_TERMS:
+        return 'property'
+    return 'other'
 
-    # Initialize session state
+def main():
+    st.markdown('<h1 class="main-header">🌈 Categorical Word Cloud: PVDF Composites</h1>', unsafe_allow_html=True)
+
     if 'wordcloud_terms' not in st.session_state:
         st.session_state.wordcloud_terms = None
     if 'query_type' not in st.session_state:
@@ -78,72 +133,81 @@ def main():
         db_path = db_paths[selected_db_name]
 
         if st.button("🚀 Load & Extract Terms", type="primary"):
-            # Load database
             try:
                 conn = sqlite3.connect(db_path)
-                # Auto-detect text column
                 tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table';", conn)['name'].tolist()
-                target_table = None
-                text_col = None
+                target_table = text_col = None
                 for table in tables:
                     cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
                     for col in ['full_text', 'abstract', 'content', 'text']:
                         if col in cols:
-                            target_table = table
-                            text_col = col
+                            target_table, text_col = table, col
                             break
-                    if target_table:
-                        break
+                    if target_table: break
                 if not target_table:
-                    st.error("No text column found in any table!")
+                    st.error("No text column found!")
                     return
                 df = pd.read_sql(f"SELECT {text_col} FROM {target_table} WHERE {text_col} IS NOT NULL AND LENGTH({text_col}) > 100 LIMIT 1000", conn)
                 conn.close()
                 texts = df[text_col].fillna('').tolist()
                 if not texts:
-                    st.error("No valid text extracted!")
+                    st.error("No valid text!")
                     return
                 st.session_state.wordcloud_terms = extract_terms_for_wordcloud(texts)
-                st.success(f"✅ Extracted {len(st.session_state.wordcloud_terms)} unique terms from {len(texts)} documents.")
+                st.success(f"✅ Extracted {len(st.session_state.wordcloud_terms)} unique terms.")
             except Exception as e:
-                st.error(f"Failed to load DB: {e}")
+                st.error(f"DB error: {e}")
 
-    # Main content: Word Cloud only
-    st.subheader("☁️ Publication-Quality Word Cloud")
+    # Main content
+    st.subheader("🌈 Categorical Word Cloud (PVDF / Dopants / Properties)")
 
     if not st.session_state.wordcloud_terms:
-        st.info("👈 Select a query dataset and click **Load & Extract Terms** to begin.")
+        st.info("👈 Select a query dataset and click **Load & Extract Terms**.")
         return
 
     term_counts = st.session_state.wordcloud_terms
 
-    # Controls
+    # Category filters
     col1, col2 = st.columns([1, 2])
     with col1:
         top_n = st.slider("Top N Terms", 10, 500, 100, 10)
-        ngram_choice = st.selectbox("N-gram Range", ["Unigrams Only", "Bigrams Only", "Unigrams + Bigrams"])
-        custom_stop = st.text_area(
-            "Exclude Terms (comma-separated)",
-            value="using,used,study,result,show,figure,table,high,low,obtained,reported,demonstrated,exhibited"
-        )
-        stopwords_set = set(w.strip().lower() for w in custom_stop.split(",") if w.strip())
+        show_pvdf = st.checkbox("Show PVDF Terms", True)
+        show_dopants = st.checkbox("Show Dopants", True)
+        show_properties = st.checkbox("Show Properties", True)
+        show_other = st.checkbox("Show Other Terms", False)
+        custom_stop = st.text_area("Exclude Terms (comma-separated)", 
+                                   value="using,used,study,result,show,figure,table,high,low,obtained")
+        custom_stop_set = set(w.strip().lower() for w in custom_stop.split(",") if w.strip())
 
-    # Filter terms
-    ngram_filter = {
-        "Unigrams Only": lambda t: " " not in t,
-        "Bigrams Only": lambda t: " " in t,
-        "Unigrams + Bigrams": lambda t: True
-    }[ngram_choice]
+    # Build category-to-color map for included terms
+    filtered_terms = {}
+    for term, count in term_counts.items():
+        if term in custom_stop_set:
+            continue
+        cat = categorize_term(term)
+        if (cat == 'pvdf' and show_pvdf) or \
+           (cat == 'dopant' and show_dopants) or \
+           (cat == 'property' and show_properties) or \
+           (cat == 'other' and show_other):
+            filtered_terms[term] = count
 
-    filtered = {
-        term: count for term, count in term_counts.items()
-        if term not in stopwords_set and ngram_filter(term)
-    }
-    top_terms = dict(Counter(filtered).most_common(top_n))
-
+    top_terms = dict(Counter(filtered_terms).most_common(top_n))
     if not top_terms:
         st.warning("No terms remain after filtering.")
         return
+
+    # Build color function
+    def color_func(word, **kwargs):
+        cat = categorize_term(word)
+        if cat == 'pvdf' and show_pvdf:
+            return CATEGORY_COLORS['pvdf']
+        elif cat == 'dopant' and show_dopants:
+            return CATEGORY_COLORS['dopant']
+        elif cat == 'property' and show_properties:
+            return CATEGORY_COLORS['property']
+        elif cat == 'other' and show_other:
+            return CATEGORY_COLORS['other']
+        return CATEGORY_COLORS['other']  # fallback
 
     # Generate word cloud
     wordcloud = WordCloud(
@@ -151,7 +215,7 @@ def main():
         height=1000,
         background_color='white',
         max_words=top_n,
-        colormap='viridis',
+        color_func=color_func,
         collocations=False,
         relative_scaling=0.5,
         regexp=r"\w[\w\ ]+"
@@ -161,23 +225,37 @@ def main():
     fig, ax = plt.subplots(figsize=(20, 10), dpi=300)
     ax.imshow(wordcloud, interpolation='bilinear')
     ax.set_title(
-        f"Top {len(top_terms)} Key Terms in Piezoelectric Literature ({st.session_state.query_type.upper()})",
+        f"Categorical Word Cloud ({st.session_state.query_type.upper()})",
         fontsize=28, fontweight='bold', pad=30, fontfamily='serif'
     )
     ax.axis('off')
     plt.tight_layout(pad=2.0)
     st.pyplot(fig, use_container_width=False)
 
+    # Legend (simulated via markdown)
+    legend_items = []
+    if show_pvdf:
+        legend_items.append(f'<span style="color:{CATEGORY_COLORS["pvdf"]}">■</span> PVDF/Polymer Terms')
+    if show_dopants:
+        legend_items.append(f'<span style="color:{CATEGORY_COLORS["dopant"]}">■</span> Dopants/Fillers')
+    if show_properties:
+        legend_items.append(f'<span style="color:{CATEGORY_COLORS["property"]}">■</span> Physicochemical Properties')
+    if show_other:
+        legend_items.append(f'<span style="color:{CATEGORY_COLORS["other"]}">■</span> Other Terms')
+    st.markdown(" &nbsp; ".join(legend_items), unsafe_allow_html=True)
+
     add_caption(r"""
-    **Methodology**: Term frequency $f_i$ visualized with $\text{size} \propto \log(1 + f_i)$.
-    Unigrams and/or bigrams extracted via regex. Domain noise terms excluded.
-    Font: Serif. Resolution: 300 DPI. Suitable for journal submission.
+    **Methodology**: Terms categorized using domain-specific lexicons.
+    - **Blue**: PVDF polymer, processing, phases
+    - **Red**: Dopants (ZnO, BaTiO₃, CNT, etc.)
+    - **Green**: Properties (d₃₃, voltage, β-phase, etc.)
+    Font: Serif. Resolution: 300 DPI. LaTeX-style caption.
     """)
 
     # Download
     buf = io.BytesIO()
     fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-    st.download_button("📥 Download High-Res Word Cloud", buf.getvalue(), "wordcloud.png", "image/png")
+    st.download_button("📥 Download High-Res Word Cloud", buf.getvalue(), "categorical_wordcloud.png", "image/png")
 
 if __name__ == "__main__":
     main()
