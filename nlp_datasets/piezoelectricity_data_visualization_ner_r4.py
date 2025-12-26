@@ -474,20 +474,26 @@ class CacheManager:
 
     def _calculate_hit_rate(self) -> float:
         """Calculate cache hit rate (placeholder for actual implementation)"""
+        # In a real implementation, you would track hits and misses
         return 0.85  # Placeholder value
 
 class BertEmbeddingCache:
     """Caches BERT embeddings for text similarity calculations"""
     def __init__(self):
         if TRANSFORMERS_AVAILABLE:
-            self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-            self.model = BertModel.from_pretrained('bert-base-uncased')
-            self.model.eval()
-            if torch.cuda.is_available():
-                self.model = self.model.cuda()
-                logger.info("BERT model loaded on GPU")
-            else:
-                logger.info("BERT model loaded on CPU")
+            try:
+                self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+                self.model = BertModel.from_pretrained('bert-base-uncased')
+                self.model.eval()
+                if torch.cuda.is_available():
+                    self.model = self.model.cuda()
+                    logger.info("BERT model loaded on GPU")
+                else:
+                    logger.info("BERT model loaded on CPU")
+            except Exception as e:
+                logger.warning(f"Failed to load BERT model: {e}")
+                self.tokenizer = None
+                self.model = None
         else:
             self.tokenizer = None
             self.model = None
@@ -499,7 +505,7 @@ class BertEmbeddingCache:
 
     def get_embedding(self, text: str) -> Optional[np.ndarray]:
         """Get BERT embedding for text, using cache if available"""
-        if not TRANSFORMERS_AVAILABLE or not text:
+        if not TRANSFORMERS_AVAILABLE or not text or self.model is None:
             return None
         
         text_hash = hashlib.md5(text.encode()).hexdigest()
@@ -600,7 +606,7 @@ class MLPropertyPredictor:
         except Exception as e:
             logger.error(f"Error training model for {material} - {property_name}: {str(e)}")
 
-    def _extract_features(self,  pd.DataFrame) -> Optional[np.ndarray]:
+    def _extract_features(self, data: pd.DataFrame) -> Optional[np.ndarray]:
         """Extract features from relationship data"""
         try:
             features = []
@@ -616,12 +622,12 @@ class MLPropertyPredictor:
                 feature_vector.append(len(sentence.split()))
                 
                 # Property-specific features
-                if 'd33' in row.get('property', ''):
+                if 'd33' in str(row.get('property', '')):
                     feature_vector.append(1.0)  # d33 indicator
                 else:
                     feature_vector.append(0.0)
                 
-                if 'beta_phase' in row.get('property', ''):
+                if 'beta_phase' in str(row.get('property', '')):
                     feature_vector.append(1.0)  # beta_phase indicator
                 else:
                     feature_vector.append(0.0)
@@ -907,7 +913,7 @@ class LocalMaterialsReferenceDB:
             return pd.DataFrame()
 
     def add_material(self, name: str, formula: str, crystal_system: str, space_group: str, 
-                    d33: float = None, source: str = "User"):
+                    d33: float = None, source: str = "User") -> bool:
         """Add a new material to the reference database"""
         if not self.conn:
             return False
@@ -998,7 +1004,7 @@ class OpenMaterialsConnector:
                             "formula": formula,
                             "crystal_system": cs,
                             "space_group": sg,
-                            "structure_url": f"http://www.crystallography.net/cod/{s.data['_cod_database_code']}.html"
+                            "structure_url": f"http://www.crystallography.net/cod/{s.data.get('_cod_database_code', '')}.html"
                         })
                         self.cache_manager.set(f"enrich_{name}", result)
                         return result
@@ -1293,6 +1299,7 @@ class EnhancedPiezoelectricKnowledgeExtractor:
         self.performance_monitor.end_timer("_extract_quantities")
         return quantities
 
+    @staticmethod
     @jit(nopython=True, cache=True)
     def _normalize_unit_jit(value: float64, unit_code: int64) -> float64:
         """Numba JIT compiled unit normalization"""
@@ -1817,7 +1824,7 @@ class PublicationQualityVisualizationEngine:
         """Create radar chart for material comparison"""
         self.performance_monitor.start_timer("create_radar_chart")
         
-        if not material_
+        if not material_data:
             self.performance_monitor.end_timer("create_radar_chart")
             return None
 
@@ -2462,7 +2469,7 @@ def main():
                         if result["ml_prediction"]:
                             with st.expander("🤖 Machine Learning Prediction"):
                                 ml_pred = result["ml_prediction"]
-                                st.markdown(f"**Model**: ml_pred['model_type']}")
+                                st.markdown(f"**Model**: {ml_pred['model_type']}")
                                 st.markdown(f"**Prediction**: {ml_pred['mean']:.2f} ± {ml_pred['std']:.2f} {result['prediction']['unit']}")
             else:
                 st.info("Analysis required before generative inference.")
@@ -2496,7 +2503,7 @@ def main():
                     st.download_button("📥 Download Papers CSV", csv, "papers.csv", "text/csv")
                 with col2:
                     excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer) as writer:
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                         papers_df.to_excel(writer, sheet_name='papers', index=False)
                         entities_df.to_excel(writer, sheet_name='entities', index=False)
                         relationships_df.to_excel(writer, sheet_name='relationships', index=False)
