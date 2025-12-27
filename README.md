@@ -44,3 +44,11 @@ Text based data extraction from web using attention mechanism
 # Wordcloud 
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezowc1-streamlit-red)](https://piezoelectricity-wordcloud1.streamlit.app/)  
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezowc2-streamlit-red)](https://piezoelectricity-wordcloud2.streamlit.app/)  
+
+# Visualizations in terms of charts
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc1-streamlit-red)](https://piezoelectric-databasevisualization1.streamlit.app/)  
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc2-streamlit-red)](https://piezoelectric-databasevisualization2.streamlit.app/)  
