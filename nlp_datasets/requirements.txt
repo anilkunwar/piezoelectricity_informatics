@@ -30,3 +30,4 @@ numba
 pymatgen
 PubChemPy
 openpyxl
+SciencePlots
