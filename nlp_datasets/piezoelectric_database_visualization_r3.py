@@ -1,4 +1,4 @@
-# dopant_impact_explorer_integrated.py
+# dopant_impact_explorer_integrated_fixed.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -137,6 +137,19 @@ st.markdown("""
     background: linear-gradient(90deg, #3B82F6 0%, #8B5CF6 50%, #EC4899 100%);
     border-radius: 2px;
     margin: 10px 0;
+}
+.schema-table {
+    border: 1px solid #E5E7EB;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    background-color: #F9FAFB;
+}
+.schema-table-header {
+    font-weight: bold;
+    color: #1E40AF;
+    font-size: 1.1rem;
+    margin-bottom: 0.5rem;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -585,16 +598,16 @@ class DatabaseManager:
         
         if not target_table:
             logger.error("No suitable table found for paper data")
-            st.error("""
+            st.error(f"""
             ❌ **No suitable table found for paper data**
             
-            **Available tables:** {}
+            **Available tables:** {', '.join(tables)}
             
             **Solution:**
             1. Ensure your database contains a table with paper data
             2. Tables should contain columns like: 'title', 'abstract', 'content', 'full_text'
             3. Consider using the schema migration helper below
-            """.format(", ".join(tables)))
+            """)
             return pd.DataFrame()
         
         # Enhanced column detection with more comprehensive mapping
@@ -630,7 +643,7 @@ class DatabaseManager:
         
         if not select_parts:
             logger.error("No suitable columns found for paper extraction")
-            st.error("""
+            st.error(f"""
             ❌ **No suitable columns found in table '{}'**
             
             **Available columns:** {}
@@ -781,7 +794,7 @@ class DatabaseManager:
         return schema
     
     def generate_schema_report(self):
-        """Generate a comprehensive schema report for the database"""
+        """Generate a comprehensive schema report for the database - FIXED: No nested expanders"""
         schema = self.get_database_schema()
         
         st.subheader("🔍 Database Schema Analysis")
@@ -796,40 +809,45 @@ class DatabaseManager:
         col3.metric("Avg Columns/Table", f"{total_columns/total_tables:.1f}" if total_tables > 0 else "0")
         col4.metric("Query ID", st.session_state.get('current_query_id', 'q0'))
         
-        # Table details
+        # Table details - FIXED: Using containers instead of nested expanders
         for table, columns in schema.items():
-            with st.expander(f"📊 Table: {table} ({len(columns)} columns)", expanded=False):
-                tab1, tab2, tab3 = st.tabs(["Columns", "Sample Data", "Analysis"])
+            st.markdown(f'<div class="schema-table">', unsafe_allow_html=True)
+            st.markdown(f'<div class="schema-table-header">📊 Table: {table} ({len(columns)} columns)</div>', unsafe_allow_html=True)
+            
+            # Create tabs for each table (tabs are allowed, expanders inside tabs are not)
+            tab1, tab2, tab3 = st.tabs(["Columns", "Sample Data", "Analysis"])
+            
+            with tab1:
+                st.markdown("**Columns:**")
+                for col in columns:
+                    st.markdown(f"- `{col}`")
+            
+            with tab2:
+                try:
+                    sample_query = f"SELECT * FROM {table} LIMIT 3"
+                    sample_df = pd.read_sql_query(sample_query, self.conn)
+                    if not sample_df.empty:
+                        st.dataframe(sample_df, use_container_width=True)
+                    else:
+                        st.info("No data in table")
+                except Exception as e:
+                    st.warning(f"Could not fetch sample data: {e}")
+            
+            with tab3:
+                # Analyze column types
+                text_cols = [col for col in columns if any(kw in col.lower() for kw in ['text', 'content', 'abstract', 'title'])]
+                date_cols = [col for col in columns if any(kw in col.lower() for kw in ['date', 'year', 'time'])]
+                id_cols = [col for col in columns if any(kw in col.lower() for kw in ['id', 'key', 'index'])]
                 
-                with tab1:
-                    st.markdown("**Columns:**")
-                    for col in columns:
-                        st.markdown(f"- `{col}`")
-                
-                with tab2:
-                    try:
-                        sample_query = f"SELECT * FROM {table} LIMIT 3"
-                        sample_df = pd.read_sql_query(sample_query, self.conn)
-                        if not sample_df.empty:
-                            st.dataframe(sample_df, use_container_width=True)
-                        else:
-                            st.info("No data in table")
-                    except Exception as e:
-                        st.warning(f"Could not fetch sample data: {e}")
-                
-                with tab3:
-                    # Analyze column types
-                    text_cols = [col for col in columns if any(kw in col.lower() for kw in ['text', 'content', 'abstract', 'title'])]
-                    date_cols = [col for col in columns if any(kw in col.lower() for kw in ['date', 'year', 'time'])]
-                    id_cols = [col for col in columns if any(kw in col.lower() for kw in ['id', 'key', 'index'])]
-                    
-                    st.markdown("**Column Analysis:**")
-                    if text_cols:
-                        st.markdown(f"📝 **Text columns:** {', '.join(text_cols)}")
-                    if date_cols:
-                        st.markdown(f"📅 **Date columns:** {', '.join(date_cols)}")
-                    if id_cols:
-                        st.markdown(f"🔑 **ID columns:** {', '.join(id_cols)}")
+                st.markdown("**Column Analysis:**")
+                if text_cols:
+                    st.markdown(f"📝 **Text columns:** {', '.join(text_cols)}")
+                if date_cols:
+                    st.markdown(f"📅 **Date columns:** {', '.join(date_cols)}")
+                if id_cols:
+                    st.markdown(f"🔑 **ID columns:** {', '.join(id_cols)}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
         
         # Text content analysis
         st.subheader("📝 Text Content Analysis")
@@ -892,8 +910,6 @@ class DatabaseManager:
         for template_name, template_sql in migration_templates.items():
             with st.expander(f"📋 {template_name}"):
                 st.code(template_sql, language='sql')
-                if st.button(f"📋 Copy {template_name}", key=f"copy_{template_name}"):
-                    st.code(template_sql, language='sql')
         
         return schema
 
@@ -1467,7 +1483,7 @@ class EnhancedDopantAnalysisEngine:
                 'y': 0.95,
                 'x': 0.5,
                 'xanchor': 'center',
-                'yanchor': 'top',
+                'yanchor: 'top',
                 'font': dict(size=22, family='Arial', color='#1E3A8A')
             },
             xaxis=dict(
@@ -1489,110 +1505,9 @@ class EnhancedDopantAnalysisEngine:
         )
         
         return fig
-    
-    def create_3d_scatter_plot(self, relationships_df: pd.DataFrame,
-                             title: str = "3D Analysis: Dopant Effects on Multiple Properties") -> go.Figure:
-        """Create 3D scatter plot for multi-dimensional analysis"""
-        if relationships_df.empty:
-            return None
-        
-        # Select top properties for 3D visualization
-        top_properties = relationships_df['property'].value_counts().head(3).index.tolist()
-        
-        if len(top_properties) < 3:
-            return None
-        
-        # Prepare data for 3D plot
-        plot_data = relationships_df.copy()
-        
-        # Create figure
-        fig = go.Figure()
-        
-        # Color by dopant category
-        categories = plot_data['dopant_category'].unique()
-        
-        for category in categories:
-            cat_data = plot_data[plot_data['dopant_category'] == category]
-            
-            # Get property values for this category
-            x_vals = []
-            y_vals = []
-            z_vals = []
-            dopant_labels = []
-            
-            for dopant in cat_data['dopant'].unique():
-                dopant_data = cat_data[cat_data['dopant'] == dopant]
-                
-                # Get average values for each property
-                x_val = dopant_data[dopant_data['property'] == top_properties[0]]['value'].mean()
-                y_val = dopant_data[dopant_data['property'] == top_properties[1]]['value'].mean()
-                z_val = dopant_data[dopant_data['property'] == top_properties[2]]['value'].mean()
-                
-                if not (np.isnan(x_val) or np.isnan(y_val) or np.isnan(z_val)):
-                    x_vals.append(x_val)
-                    y_vals.append(y_val)
-                    z_vals.append(z_val)
-                    dopant_labels.append(dopant)
-            
-            if x_vals:  # Only add trace if we have data
-                fig.add_trace(go.Scatter3d(
-                    x=x_vals,
-                    y=y_vals,
-                    z=z_vals,
-                    mode='markers+text',
-                    name=category,
-                    text=dopant_labels,
-                    marker=dict(
-                        size=10,
-                        color=self.colors.get(category, '#666666'),
-                        opacity=0.7,
-                        line=dict(width=1, color='white')
-                    ),
-                    hovertemplate=(
-                        "<b>%{text}</b><br>" +
-                        f"{top_properties[0]}: %{{x:.1f}}<br>" +
-                        f"{top_properties[1]}: %{{y:.1f}}<br>" +
-                        f"{top_properties[2]}: %{{z:.1f}}<br>" +
-                        "Category: " + category + "<br>" +
-                        "<extra></extra>"
-                    )
-                ))
-        
-        # Update layout
-        fig.update_layout(
-            title={
-                'text': title,
-                'y': 0.95,
-                'x': 0.5,
-                'xanchor': 'center',
-                'yanchor': 'top',
-                'font': dict(size=22, family='Arial', color='#1E3A8A')
-            },
-            scene=dict(
-                xaxis_title=top_properties[0],
-                yaxis_title=top_properties[1],
-                zaxis_title=top_properties[2],
-                camera=dict(
-                    eye=dict(x=1.5, y=1.5, z=1.5)
-                )
-            ),
-            height=800,
-            width=900,
-            margin=dict(t=100, b=50, l=50, r=50),
-            legend=dict(
-                font=dict(size=12),
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=0.01
-            ),
-            paper_bgcolor='white'
-        )
-        
-        return fig
 
 # ==============================
-# ENHANCED MAIN APPLICATION WITH QUERY SUPPORT & ROBUST LOADING
+# MAIN APPLICATION WITH FIXED NESTED EXPANDER ISSUE
 # ==============================
 def main():
     """Enhanced main Streamlit application with robust data loading"""
@@ -1687,7 +1602,7 @@ def main():
             st.error(f"""
             ❌ **No databases found for query '{st.session_state.current_query_id}'!**
             
-            **Expected files in `{KNOWLEDGE_DB_DIR}/`:**
+            **Expected files in `knowledge_database/`:**
             - `{os.path.basename(current_db_paths["Metadata DB"])}`
             - `{os.path.basename(current_db_paths["Universe DB"])}`
             - `{os.path.basename(current_db_paths["PDF Storage DB"])}`
@@ -1782,222 +1697,194 @@ def main():
             <strong>Hit Rate:</strong> {cache_info['hit_rate']:.1%}
         </div>
         """, unsafe_allow_html=True)
-        
-        # Enhanced help section
-        with st.expander("📚 User Guide & Documentation"):
-            st.markdown("""
-            ### **Enhanced Features:**
-            
-            **Robust Data Loading:**
-            - ✅ **Schema Detection**: Automatically detects table structures
-            - ✅ **Column Mapping**: Intelligently maps columns to expected schema
-            - ✅ **Fallback Strategies**: Multiple fallback levels for problematic databases
-            - ✅ **Query Support**: Switch between different research datasets (q0, q1, etc.)
-            
-            **Publication-Quality Visualizations:**
-            - ✅ **Sunburst Charts**: Interactive hierarchical views with color scaling
-            - ✅ **Radar Charts**: Multi-property comparisons with confidence indicators
-            - ✅ **3D Scatter Plots**: Multi-dimensional analysis of dopant effects
-            - ✅ **Heatmaps**: Concentration optimization visualizations
-            
-            **Advanced Analysis:**
-            - ✅ **Confidence Scoring**: Quality assessment of extracted relationships
-            - ✅ **Enhanced Extraction**: Better pattern recognition for dopants and properties
-            - ✅ **Performance Monitoring**: Track and optimize analysis performance
-            - ✅ **Comprehensive Export**: High-res formats for publications
-            
-            **Database Compatibility:**
-            - Supports multiple database schemas
-            - Automatic column name detection
-            - Graceful degradation with fallback queries
-            - Schema analysis and migration helpers
-            """)
     
     # Schema analysis
     if schema_btn and selected_db and db_path:
-        with st.spinner("🔍 Analyzing database schema..."):
-            try:
-                db_manager = DatabaseManager(db_path, st.session_state.current_query_id, 
-                                           custom_db_path if use_custom_files else None)
-                if db_manager.connect():
-                    schema = db_manager.generate_schema_report()
-                    st.session_state.database_manager = db_manager
-                else:
-                    st.error("Failed to connect to database for schema analysis")
-            except Exception as e:
-                st.error(f"Schema analysis failed: {str(e)}")
+        st.markdown("### 🔍 Database Schema Analysis")
+        try:
+            db_manager = DatabaseManager(db_path, st.session_state.current_query_id, 
+                                       custom_db_path if use_custom_files else None)
+            if db_manager.connect():
+                schema = db_manager.generate_schema_report()
+                st.session_state.database_manager = db_manager
+            else:
+                st.error("Failed to connect to database for schema analysis")
+        except Exception as e:
+            st.error(f"Schema analysis failed: {str(e)}")
     
     # Main analysis workflow with robust loading
     if analyze_btn and selected_db and db_path:
-        with st.spinner(f"🔬 Analyzing dopant relationships from Query {st.session_state.current_query_id}..."):
-            try:
-                # Initialize database manager with robust loading
-                st.session_state.performance_monitor.start_timer("database_initialization")
-                
-                db_manager = DatabaseManager(db_path, st.session_state.current_query_id,
-                                           custom_db_path if use_custom_files else None)
-                
-                # Test connection with progress feedback
-                connection_status = st.empty()
-                connection_status.markdown("🔌 Connecting to database...")
-                
-                if not db_manager.connect():
-                    connection_status.error("❌ Database connection failed")
-                    return
-                
-                connection_status.success("✅ Database connected successfully")
-                st.session_state.performance_monitor.end_timer("database_initialization")
-                
-                # Enhanced database schema analysis with user feedback
-                with st.expander("🗃️ Database Schema Overview", expanded=True):
-                    schema_info = st.empty()
-                    schema_info.markdown("📋 Analyzing database structure...")
-                    
-                    schema = db_manager.generate_schema_report()
-                    schema_info.empty()  # Clear the loading message
-                
-                # Load papers with robust extraction and progress tracking
-                st.markdown("### 📥 Data Loading & Extraction")
-                st.markdown('<div class="data-loading-bar"></div>', unsafe_allow_html=True)
-                
-                loading_progress = st.progress(0)
-                loading_status = st.empty()
-                
-                loading_status.text("📥 Loading papers from database...")
-                st.session_state.performance_monitor.start_timer("paper_loading")
-                
-                papers_df = db_manager.get_papers_data(max_papers)
-                st.session_state.performance_monitor.end_timer("paper_loading")
-                
-                loading_progress.progress(0.3)
-                loading_status.text(f"✅ Loaded {len(papers_df)} papers")
-                
-                if papers_df.empty:
-                    st.error("""
-                    ❌ **No papers found in database!**
-                    
-                    **Possible causes:**
-                    1. Database doesn't contain paper data
-                    2. Text columns are empty or too short
-                    3. Database schema is incompatible
-                    
-                    **Solutions:**
-                    1. Check database content
-                    2. Use schema analysis to debug structure
-                    3. Try a different database or query dataset
-                    """)
-                    
-                    # Offer to show sample data
-                    if st.button("🎲 Generate Sample Data for Demonstration"):
-                        relationships_df = create_sample_data_for_query(st.session_state.current_query_id)
-                        st.session_state.dopant_relationships = relationships_df
-                        st.success("Sample data generated! Explore the visualization tabs.")
-                    
-                    return
-                
-                # Extract dopant relationships
-                loading_status.text("🧪 Extracting dopant relationships...")
-                st.session_state.performance_monitor.start_timer("relationship_extraction")
-                
-                engine = st.session_state.analysis_engine
-                relationships_df = engine.extract_dopant_relationships(papers_df)
-                
-                st.session_state.performance_monitor.end_timer("relationship_extraction")
-                loading_progress.progress(0.8)
-                
-                if relationships_df.empty:
-                    st.warning("""
-                    ⚠️ **No dopant relationships extracted.**
-                    
-                    **Possible reasons:**
-                    1. Papers don't discuss piezoelectric dopants
-                    2. Extraction keywords need adjustment
-                    3. Text quality is poor or incomplete
-                    
-                    **Try:**
-                    - Using a different query dataset
-                    - Increasing max papers processed
-                    - Checking paper content in database
-                    """)
-                    
-                    # Show sample of papers for debugging
-                    with st.expander("🔍 Sample Papers Content"):
-                        st.markdown("**First 5 papers for debugging:**")
-                        for i, row in papers_df.head(5).iterrows():
-                            st.markdown(f"**Paper {i+1}:**")
-                            st.markdown(f"*Title:* {row.get('title', 'No title')}")
-                            st.markdown(f"*Abstract (first 200 chars):* {row.get('abstract', '')[:200]}...")
-                            st.markdown("---")
-                else:
-                    loading_status.text("🎨 Preparing visualizations...")
-                    
-                    # Store results
-                    st.session_state.processed_data = papers_df
-                    st.session_state.dopant_relationships = relationships_df
-                    st.session_state.database_manager = db_manager
-                    
-                    loading_progress.progress(1.0)
-                    time.sleep(0.5)
-                    loading_status.empty()
-                    loading_progress.empty()
-                    
-                    st.success(f"""
-                    ✅ **Analysis Complete!**
-                    
-                    **Results Summary:**
-                    - 📄 **Papers Processed**: {len(papers_df)}
-                    - 🔗 **Dopant Relationships**: {len(relationships_df)}
-                    - 🧪 **Unique Dopants**: {relationships_df['dopant'].nunique()}
-                    - 🏗️ **Base Materials**: {relationships_df['base_material'].nunique()}
-                    - 🎯 **Properties Enhanced**: {relationships_df['property'].nunique()}
-                    
-                    **Query Dataset:** {st.session_state.current_query_id}
-                    """)
-                    
-                    # Show quick insights
-                    with st.expander("📊 Quick Insights", expanded=True):
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            top_dopant = relationships_df['dopant'].value_counts().index[0]
-                            st.metric("Most Studied Dopant", top_dopant)
-                        
-                        with col2:
-                            top_category = relationships_df['dopant_category'].value_counts().index[0]
-                            st.metric("Top Dopant Category", top_category)
-                        
-                        with col3:
-                            avg_enhancement = relationships_df['enhancement_factor'].mean()
-                            st.metric("Avg Enhancement", f"{avg_enhancement:.2f}×")
-                        
-                        # Top enhancements
-                        st.markdown("**Top 5 Property Enhancements:**")
-                        top_enhancements = relationships_df.groupby('property')['enhancement_factor'].mean().nlargest(5)
-                        for prop, enhancement in top_enhancements.items():
-                            st.markdown(f"- {prop}: {enhancement:.2f}× improvement")
+        st.markdown("## 🔬 Analysis Workflow")
+        
+        try:
+            # Initialize database manager with robust loading
+            st.session_state.performance_monitor.start_timer("database_initialization")
             
-            except Exception as e:
-                st.error(f"""
-                ❌ **Analysis Failed!**
-                
-                **Error Details:**
-                ```python
-                {str(e)}
-                ```
-                
-                **Troubleshooting Steps:**
-                1. Check database file path and permissions
-                2. Ensure database is not corrupted
-                3. Verify sufficient memory is available
-                4. Try reducing max papers to process
-                
-                **Technical Details:**
-                - Query ID: {st.session_state.current_query_id}
-                - Database: {db_path if 'db_path' in locals() else 'Unknown'}
-                - Max Papers: {max_papers}
-                """)
-                logger.error(f"Analysis failed: {str(e)}", exc_info=True)
+            db_manager = DatabaseManager(db_path, st.session_state.current_query_id,
+                                       custom_db_path if use_custom_files else None)
+            
+            # Test connection with progress feedback
+            connection_status = st.empty()
+            connection_status.markdown("🔌 Connecting to database...")
+            
+            if not db_manager.connect():
+                connection_status.error("❌ Database connection failed")
                 return
+            
+            connection_status.success("✅ Database connected successfully")
+            st.session_state.performance_monitor.end_timer("database_initialization")
+            
+            # Database schema analysis with user feedback - FIXED: No nested expander
+            st.markdown("### 🗃️ Database Schema Overview")
+            schema_info = st.empty()
+            schema_info.markdown("📋 Analyzing database structure...")
+            
+            schema = db_manager.generate_schema_report()
+            schema_info.empty()  # Clear the loading message
+            
+            # Load papers with robust extraction and progress tracking
+            st.markdown("### 📥 Data Loading & Extraction")
+            st.markdown('<div class="data-loading-bar"></div>', unsafe_allow_html=True)
+            
+            loading_progress = st.progress(0)
+            loading_status = st.empty()
+            
+            loading_status.text("📥 Loading papers from database...")
+            st.session_state.performance_monitor.start_timer("paper_loading")
+            
+            papers_df = db_manager.get_papers_data(max_papers)
+            st.session_state.performance_monitor.end_timer("paper_loading")
+            
+            loading_progress.progress(0.3)
+            loading_status.text(f"✅ Loaded {len(papers_df)} papers")
+            
+            if papers_df.empty:
+                st.error("""
+                ❌ **No papers found in database!**
+                
+                **Possible causes:**
+                1. Database doesn't contain paper data
+                2. Text columns are empty or too short
+                3. Database schema is incompatible
+                
+                **Solutions:**
+                1. Check database content
+                2. Use schema analysis to debug structure
+                3. Try a different database or query dataset
+                """)
+                
+                # Offer to show sample data
+                if st.button("🎲 Generate Sample Data for Demonstration"):
+                    relationships_df = create_sample_data_for_query(st.session_state.current_query_id)
+                    st.session_state.dopant_relationships = relationships_df
+                    st.success("Sample data generated! Explore the visualization tabs.")
+                    st.rerun()
+                
+                return
+            
+            # Extract dopant relationships
+            loading_status.text("🧪 Extracting dopant relationships...")
+            st.session_state.performance_monitor.start_timer("relationship_extraction")
+            
+            engine = st.session_state.analysis_engine
+            relationships_df = engine.extract_dopant_relationships(papers_df)
+            
+            st.session_state.performance_monitor.end_timer("relationship_extraction")
+            loading_progress.progress(0.8)
+            
+            if relationships_df.empty:
+                st.warning("""
+                ⚠️ **No dopant relationships extracted.**
+                
+                **Possible reasons:**
+                1. Papers don't discuss piezoelectric dopants
+                2. Extraction keywords need adjustment
+                3. Text quality is poor or incomplete
+                
+                **Try:**
+                - Using a different query dataset
+                - Increasing max papers processed
+                - Checking paper content in database
+                """)
+                
+                # Show sample of papers for debugging
+                st.markdown("#### 🔍 Sample Papers Content")
+                st.markdown("**First 5 papers for debugging:**")
+                for i, row in papers_df.head(5).iterrows():
+                    st.markdown(f"**Paper {i+1}:**")
+                    st.markdown(f"*Title:* {row.get('title', 'No title')}")
+                    st.markdown(f"*Abstract (first 200 chars):* {row.get('abstract', '')[:200]}...")
+                    st.markdown("---")
+            else:
+                loading_status.text("🎨 Preparing visualizations...")
+                
+                # Store results
+                st.session_state.processed_data = papers_df
+                st.session_state.dopant_relationships = relationships_df
+                st.session_state.database_manager = db_manager
+                
+                loading_progress.progress(1.0)
+                time.sleep(0.5)
+                loading_status.empty()
+                loading_progress.empty()
+                
+                st.success(f"""
+                ✅ **Analysis Complete!**
+                
+                **Results Summary:**
+                - 📄 **Papers Processed**: {len(papers_df)}
+                - 🔗 **Dopant Relationships**: {len(relationships_df)}
+                - 🧪 **Unique Dopants**: {relationships_df['dopant'].nunique()}
+                - 🏗️ **Base Materials**: {relationships_df['base_material'].nunique()}
+                - 🎯 **Properties Enhanced**: {relationships_df['property'].nunique()}
+                
+                **Query Dataset:** {st.session_state.current_query_id}
+                """)
+                
+                # Show quick insights
+                st.markdown("#### 📊 Quick Insights")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    top_dopant = relationships_df['dopant'].value_counts().index[0]
+                    st.metric("Most Studied Dopant", top_dopant)
+                
+                with col2:
+                    top_category = relationships_df['dopant_category'].value_counts().index[0]
+                    st.metric("Top Dopant Category", top_category)
+                
+                with col3:
+                    avg_enhancement = relationships_df['enhancement_factor'].mean()
+                    st.metric("Avg Enhancement", f"{avg_enhancement:.2f}×")
+                
+                # Top enhancements
+                st.markdown("**Top 5 Property Enhancements:**")
+                top_enhancements = relationships_df.groupby('property')['enhancement_factor'].mean().nlargest(5)
+                for prop, enhancement in top_enhancements.items():
+                    st.markdown(f"- {prop}: {enhancement:.2f}× improvement")
+        
+        except Exception as e:
+            st.error(f"""
+            ❌ **Analysis Failed!**
+            
+            **Error Details:**
+            ```python
+            {str(e)}
+            ```
+            
+            **Troubleshooting Steps:**
+            1. Check database file path and permissions
+            2. Ensure database is not corrupted
+            3. Verify sufficient memory is available
+            4. Try reducing max papers to process
+            
+            **Technical Details:**
+            - Query ID: {st.session_state.current_query_id}
+            - Database: {db_path if 'db_path' in locals() else 'Unknown'}
+            - Max Papers: {max_papers}
+            """)
+            logger.error(f"Analysis failed: {str(e)}", exc_info=True)
+            return
     
     # Enhanced results display
     if st.session_state.dopant_relationships is not None and not st.session_state.dopant_relationships.empty:
@@ -2009,11 +1896,9 @@ def main():
             "🌳 Hierarchical Analysis", 
             "📡 Multi-Property Comparison", 
             "🔥 Concentration Heatmap",
-            "📊 3D Analysis",
             "💡 Recommendations",
             "🔍 Data Explorer",
-            "⚙️ Advanced Settings",
-            "📈 Performance Metrics"
+            "⚙️ Advanced Settings"
         ])
         
         # Tab 1: Enhanced Sunburst Chart
@@ -2071,8 +1956,7 @@ def main():
                 from Query {st.session_state.current_query_id}. The chart shows {max_depth} levels: 
                 (1) Base materials (center), (2) Dopant categories, (3) Specific dopants, and (4) Enhanced properties. 
                 Color intensity represents the enhancement factor (1.0-3.0 scale). Segment size is proportional 
-                to both enhancement factor and number of supporting studies. This visualization helps identify 
-                which dopant categories provide the broadest property enhancement across different material systems.
+                to both enhancement factor and number of supporting studies.
                 """, "📊")
         
         # Tab 2: Enhanced Radar Chart
@@ -2096,7 +1980,6 @@ def main():
             with col2:
                 normalize = st.checkbox("Normalize values", value=True, key="radar_normalize")
                 show_average = st.checkbox("Show average line", value=True, key="radar_average")
-                show_confidence = st.checkbox("Show confidence indicators", value=True, key="radar_confidence")
             
             if len(selected_dopants) >= 2:
                 fig = engine.create_enhanced_radar_chart(
@@ -2137,11 +2020,7 @@ def main():
                     **Figure 2:** Radar chart comparing the performance profiles of different dopants 
                     across multiple piezoelectric properties from Query {st.session_state.current_query_id}. 
                     Each axis represents a key property, with distance from the center indicating 
-                    enhancement factor relative to undoped material (1.0 = baseline). 
-                    {f"Values are normalized for fair comparison." if normalize else "Values show absolute enhancement factors."}
-                    {f"Confidence indicators show reliability of data." if show_confidence else ""}
-                    This visualization helps identify dopants with balanced enhancement across 
-                    multiple properties versus those with specific strengths.
+                    enhancement factor relative to undoped material (1.0 = baseline).
                     """, "🎯")
         
         # Tab 3: Concentration Heatmap
@@ -2193,90 +2072,49 @@ def main():
                 **Figure 3:** Heatmap showing the relationship between dopant concentration 
                 (x-axis) and property enhancement factor (color scale) for various dopants 
                 (y-axis) from Query {st.session_state.current_query_id}. Darker colors indicate 
-                higher enhancement. This visualization helps identify optimal concentration 
-                ranges for each dopant, revealing patterns of diminishing returns at high 
-                concentrations and threshold effects at low concentrations.
+                higher enhancement.
                 """, "🔥")
         
-        # Tab 4: 3D Analysis
+        # Tab 4: Enhanced Recommendations
         with tabs[3]:
-            st.markdown("### 📊 3D Multi-Dimensional Analysis")
-            
-            fig = engine.create_3d_scatter_plot(
-                relationships_df,
-                title=f"3D Analysis of Dopant Effects (Query {st.session_state.current_query_id})"
-            )
-            
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # 3D controls
-                st.markdown("#### 🎮 3D View Controls")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown("**Rotation:** Click and drag")
-                with col2:
-                    st.markdown("**Zoom:** Scroll wheel")
-                with col3:
-                    st.markdown("**Pan:** Right-click and drag")
-                
-                add_caption(f"""
-                **Figure 4:** 3D scatter plot showing the relationships between three key 
-                piezoelectric properties enhanced by different dopant categories from 
-                Query {st.session_state.current_query_id}. Each point represents a dopant-material 
-                combination, colored by dopant category. This visualization reveals clusters 
-                of similar performance profiles and helps identify dopants that simultaneously 
-                enhance multiple properties.
-                """, "📊")
-        
-        # Tab 5: Enhanced Recommendations
-        with tabs[4]:
             st.markdown("### 💡 Application-Specific Recommendations")
             
-            # Application selection with enhanced descriptions
+            # Application selection
             applications = {
-                "Energy Harvesting": {
-                    "description": "High d₃₃, voltage output, and power density for energy conversion",
-                    "criteria": {"d₃₃ (pC/N)": 2.0, "Voltage Output (V)": 1.8, "Power Density (μW/cm²)": 2.0}
-                },
-                "Sensors": {
-                    "description": "High sensitivity, stability, and d₃₃ for sensing applications",
-                    "criteria": {"d₃₃ (pC/N)": 1.7, "β-phase (%)": 1.8, "Dielectric Constant": 1.5}
-                },
-                "Actuators": {
-                    "description": "High strain, response time, and d₃₃ for actuation",
-                    "criteria": {"d₃₃ (pC/N)": 1.8, "Young's Modulus (GPa)": 1.7, "Conductivity (S/m)": 1.5}
-                },
-                "High Temperature": {
-                    "description": "High Curie temperature and thermal stability",
-                    "criteria": {"Curie Temp (°C)": 2.0, "Dielectric Constant": 1.8}
-                },
-                "Flexible Electronics": {
-                    "description": "High flexibility, β-phase content, and durability",
-                    "criteria": {"β-phase (%)": 2.0, "Young's Modulus (GPa)": 1.8, "d₃₃ (pC/N)": 1.7}
-                }
+                "Energy Harvesting": "High d₃₃, voltage output, and power density for energy conversion",
+                "Sensors": "High sensitivity, stability, and d₃₃ for sensing applications",
+                "Actuators": "High strain, response time, and d₃₃ for actuation",
+                "High Temperature": "High Curie temperature and thermal stability",
+                "Flexible Electronics": "High flexibility, β-phase content, and durability"
             }
             
             selected_app = st.selectbox(
                 "Select target application",
                 list(applications.keys()),
-                format_func=lambda x: f"{x}: {applications[x]['description']}"
+                help=applications[selected_app] if 'selected_app' in locals() else ""
             )
             
             # Recommendation parameters
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             with col1:
                 min_confidence = st.slider("Min Confidence", 0.0, 1.0, 0.7, 0.1, key="rec_confidence")
             with col2:
                 n_recommendations = st.slider("Number of Recommendations", 1, 10, 5, key="rec_count")
-            with col3:
-                include_processing = st.checkbox("Include Processing Methods", value=True, key="rec_processing")
             
-            if st.button("✨ Generate Enhanced Recommendations", type="primary", key="rec_generate"):
+            if st.button("✨ Generate Recommendations", type="primary", key="rec_generate"):
                 with st.spinner("Generating optimized recommendations..."):
-                    # Calculate scores based on application criteria
-                    app_criteria = applications[selected_app]["criteria"]
+                    # Application-specific criteria
+                    app_criteria = {
+                        "Energy Harvesting": {'d₃₃ (pC/N)': 2.0, 'Voltage Output (V)': 1.8, 'Power Density (μW/cm²)': 2.0},
+                        "Sensors": {'d₃₃ (pC/N)': 1.7, 'β-phase (%)': 1.8, 'Dielectric Constant': 1.5},
+                        "Actuators": {'d₃₃ (pC/N)': 1.8, 'Young\'s Modulus (GPa)': 1.7, 'Conductivity (S/m)': 1.5},
+                        "High Temperature": {'Curie Temp (°C)': 2.0, 'Dielectric Constant': 1.8},
+                        "Flexible Electronics": {'β-phase (%)': 2.0, 'Young\'s Modulus (GPa)': 1.8, 'd₃₃ (pC/N)': 1.7}
+                    }
                     
+                    criteria = app_criteria.get(selected_app, app_criteria["Energy Harvesting"])
+                    
+                    # Calculate scores for each dopant
                     recommendations = []
                     for dopant in relationships_df['dopant'].unique():
                         dopant_df = relationships_df[relationships_df['dopant'] == dopant]
@@ -2287,7 +2125,7 @@ def main():
                         score = 0.0
                         weight_sum = 0.0
                         
-                        for prop, weight in app_criteria.items():
+                        for prop, weight in criteria.items():
                             prop_df = dopant_df[dopant_df['property'] == prop]
                             if not prop_df.empty:
                                 avg_enhance = prop_df['enhancement_factor'].mean()
@@ -2326,64 +2164,63 @@ def main():
                     recommendations = recommendations[:n_recommendations]
                     
                     if not recommendations:
-                        st.warning("No recommendations available. Try adjusting confidence threshold or select different application.")
+                        st.warning("No recommendations available. Try adjusting confidence threshold.")
                     else:
                         st.markdown(f"### 🏆 Top Recommendations for {selected_app}")
                         
                         for i, rec in enumerate(recommendations):
-                            with st.container():
-                                # Color based on confidence
-                                if rec['confidence'] > 0.8:
-                                    color = "#10B981"  # Green
-                                elif rec['confidence'] > 0.6:
-                                    color = "#F59E0B"  # Yellow
-                                else:
-                                    color = "#EF4444"  # Red
-                                
-                                st.markdown(f"""
-                                <div style="
-                                    background: linear-gradient(135deg, #FFFFFF 0%, #F8FAFC 100%);
-                                    padding: 1.5rem; 
-                                    border-radius: 12px; 
-                                    margin: 1rem 0;
-                                    border-left: 6px solid {color};
-                                    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-                                ">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <h3 style="color: #1E40AF; margin: 0;">#{i+1} {rec['dopant']}</h3>
-                                        <span style="
-                                            background-color: {color};
-                                            color: white;
-                                            padding: 4px 12px;
-                                            border-radius: 20px;
-                                            font-weight: bold;
-                                            font-size: 0.9rem;
-                                        ">{rec['confidence']:.0%} Confidence</span>
+                            # Color based on confidence
+                            if rec['confidence'] > 0.8:
+                                color = "#10B981"  # Green
+                            elif rec['confidence'] > 0.6:
+                                color = "#F59E0B"  # Yellow
+                            else:
+                                color = "#EF4444"  # Red
+                            
+                            st.markdown(f"""
+                            <div style="
+                                background: linear-gradient(135deg, #FFFFFF 0%, #F8FAFC 100%);
+                                padding: 1.5rem; 
+                                border-radius: 12px; 
+                                margin: 1rem 0;
+                                border-left: 6px solid {color};
+                                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+                            ">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <h3 style="color: #1E40AF; margin: 0;">#{i+1} {rec['dopant']}</h3>
+                                    <span style="
+                                        background-color: {color};
+                                        color: white;
+                                        padding: 4px 12px;
+                                        border-radius: 20px;
+                                        font-weight: bold;
+                                        font-size: 0.9rem;
+                                    ">{rec['confidence']:.0%} Confidence</span>
+                                </div>
+                                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem;">
+                                    <div>
+                                        <strong>📊 Overall Score</strong><br>
+                                        {rec['score']:.2f}/3.0
                                     </div>
-                                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem;">
-                                        <div>
-                                            <strong>📊 Overall Score</strong><br>
-                                            {rec['score']:.2f}/3.0
-                                        </div>
-                                        <div>
-                                            <strong>⚡ Avg Enhancement</strong><br>
-                                            {rec['avg_enhancement']:.2f}×
-                                        </div>
-                                        <div>
-                                            <strong>📚 Studies</strong><br>
-                                            {rec['n_studies']} papers
-                                        </div>
+                                    <div>
+                                        <strong>⚡ Avg Enhancement</strong><br>
+                                        {rec['avg_enhancement']:.2f}×
                                     </div>
-                                    <div style="margin-top: 1rem;">
-                                        <strong>🏷️ Category:</strong> {rec['category']}<br>
-                                        <strong>🎯 Key Properties:</strong> {', '.join(rec['key_properties'])}<br>
-                                        <strong>🏗️ Best Base Materials:</strong> {', '.join(rec['best_base_materials'])}
+                                    <div>
+                                        <strong>📚 Studies</strong><br>
+                                        {rec['n_studies']} papers
                                     </div>
                                 </div>
-                                """, unsafe_allow_html=True)
+                                <div style="margin-top: 1rem;">
+                                    <strong>🏷️ Category:</strong> {rec['category']}<br>
+                                    <strong>🎯 Key Properties:</strong> {', '.join(rec['key_properties'])}<br>
+                                    <strong>🏗️ Best Base Materials:</strong> {', '.join(rec['best_base_materials'])}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
         
-        # Tab 6: Enhanced Data Explorer
-        with tabs[5]:
+        # Tab 5: Enhanced Data Explorer
+        with tabs[4]:
             st.markdown("### 🔍 Advanced Data Explorer")
             
             # Data summary
@@ -2398,7 +2235,7 @@ def main():
                 st.metric("Avg Confidence", f"{relationships_df['confidence_score'].mean():.2f}" 
                          if 'confidence_score' in relationships_df.columns else "N/A")
             
-            # Interactive data table with enhanced filters
+            # Interactive data table with filters
             st.markdown("#### 🔧 Interactive Data Filters")
             
             filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
@@ -2446,73 +2283,28 @@ def main():
             
             # Display filtered data
             st.markdown(f"**Filtered Results:** {len(filtered_df)} relationships")
+            st.dataframe(
+                filtered_df,
+                use_container_width=True,
+                height=400,
+                column_config={
+                    "paper_id": st.column_config.NumberColumn("Paper ID"),
+                    "base_material": st.column_config.TextColumn("Base Material"),
+                    "dopant": st.column_config.TextColumn("Dopant"),
+                    "dopant_category": st.column_config.TextColumn("Category"),
+                    "property": st.column_config.TextColumn("Property"),
+                    "value": st.column_config.NumberColumn("Value", format="%.2f"),
+                    "enhancement_factor": st.column_config.NumberColumn("Enhancement", format="%.2f"),
+                    "confidence_score": st.column_config.NumberColumn("Confidence", format="%.2f"),
+                    "concentration_range": st.column_config.TextColumn("Concentration"),
+                    "processing_method": st.column_config.TextColumn("Processing"),
+                    "context": st.column_config.TextColumn("Context", width="large")
+                }
+            )
             
-            # Data preview with tabs
-            data_tabs = st.tabs(["📊 Data Table", "📈 Statistics", "📋 Summary"])
-            
-            with data_tabs[0]:
-                st.dataframe(
-                    filtered_df,
-                    use_container_width=True,
-                    height=400,
-                    column_config={
-                        "paper_id": st.column_config.NumberColumn("Paper ID", help="Unique paper identifier"),
-                        "base_material": st.column_config.TextColumn("Base Material", help="Host material being doped"),
-                        "dopant": st.column_config.TextColumn("Dopant", help="Doping material"),
-                        "dopant_category": st.column_config.TextColumn("Category", help="Chemical category of dopant"),
-                        "property": st.column_config.TextColumn("Property", help="Enhanced property"),
-                        "value": st.column_config.NumberColumn("Value", format="%.2f", help="Property value"),
-                        "enhancement_factor": st.column_config.NumberColumn("Enhancement", format="%.2f", help="Improvement factor"),
-                        "confidence_score": st.column_config.NumberColumn("Confidence", format="%.2f", help="Extraction confidence"),
-                        "concentration_range": st.column_config.TextColumn("Concentration", help="Doping concentration"),
-                        "processing_method": st.column_config.TextColumn("Processing", help="Fabrication method"),
-                        "context": st.column_config.TextColumn("Context", width="large", help="Extraction context")
-                    }
-                )
-            
-            with data_tabs[1]:
-                # Statistical summary
-                if not filtered_df.empty:
-                    stats_col1, stats_col2 = st.columns(2)
-                    
-                    with stats_col1:
-                        st.markdown("**Enhancement Factor Statistics:**")
-                        enhancement_stats = filtered_df['enhancement_factor'].describe()
-                        for stat, value in enhancement_stats.items():
-                            st.markdown(f"- **{stat.title()}:** {value:.3f}")
-                    
-                    with stats_col2:
-                        st.markdown("**Value Statistics:**")
-                        value_stats = filtered_df['value'].describe()
-                        for stat, value in value_stats.items():
-                            st.markdown(f"- **{stat.title()}:** {value:.3f}")
-                    
-                    # Confidence statistics if available
-                    if 'confidence_score' in filtered_df.columns:
-                        st.markdown("**Confidence Score Statistics:**")
-                        confidence_stats = filtered_df['confidence_score'].describe()
-                        for stat, value in confidence_stats.items():
-                            st.markdown(f"- **{stat.title()}:** {value:.3f}")
-            
-            with data_tabs[2]:
-                # Summary by category
-                summary_col1, summary_col2 = st.columns(2)
-                
-                with summary_col1:
-                    st.markdown("**Top Dopants by Frequency:**")
-                    top_dopants = filtered_df['dopant'].value_counts().head(10)
-                    for dopant, count in top_dopants.items():
-                        st.markdown(f"- {dopant}: {count} relationships")
-                
-                with summary_col2:
-                    st.markdown("**Top Properties by Frequency:**")
-                    top_properties = filtered_df['property'].value_counts().head(10)
-                    for prop, count in top_properties.items():
-                        st.markdown(f"- {prop}: {count} relationships")
-            
-            # Enhanced export options
+            # Export options
             st.markdown("### 📥 Data Export Options")
-            export_col1, export_col2, export_col3, export_col4 = st.columns(4)
+            export_col1, export_col2, export_col3 = st.columns(3)
             
             with export_col1:
                 csv = filtered_df.to_csv(index=False).encode('utf-8')
@@ -2528,28 +2320,7 @@ def main():
             with export_col2:
                 excel_buffer = io.BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                    # Main data
                     filtered_df.to_excel(writer, sheet_name='Dopant_Analysis', index=False)
-                    
-                    # Summary sheets
-                    summary_df = filtered_df.groupby(['dopant_category', 'base_material']).agg({
-                        'enhancement_factor': ['mean', 'std', 'count'],
-                        'value': ['mean', 'std']
-                    }).round(3)
-                    summary_df.to_excel(writer, sheet_name='Summary')
-                    
-                    # Statistics sheet
-                    stats_df = pd.DataFrame({
-                        'Metric': ['Total Relationships', 'Unique Dopants', 'Average Enhancement', 'Average Confidence'],
-                        'Value': [
-                            len(filtered_df),
-                            filtered_df['dopant'].nunique(),
-                            filtered_df['enhancement_factor'].mean(),
-                            filtered_df['confidence_score'].mean() if 'confidence_score' in filtered_df.columns else 'N/A'
-                        ]
-                    })
-                    stats_df.to_excel(writer, sheet_name='Statistics', index=False)
-                
                 excel_buffer.seek(0)
                 st.download_button(
                     "📈 Excel Export",
@@ -2570,52 +2341,14 @@ def main():
                     use_container_width=True,
                     key="export_json"
                 )
-            
-            with export_col4:
-                # Generate comprehensive report
-                report = f"""
-                # Dopant Impact Analysis Report
-                
-                ## Metadata
-                - Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
-                - Query Dataset: {st.session_state.current_query_id}
-                - Analysis Date: {time.strftime('%Y-%m-%d')}
-                
-                ## Summary Statistics
-                - Total Relationships: {len(filtered_df)}
-                - Unique Dopants: {filtered_df['dopant'].nunique()}
-                - Base Materials: {filtered_df['base_material'].nunique()}
-                - Properties Enhanced: {filtered_df['property'].nunique()}
-                - Average Enhancement: {filtered_df['enhancement_factor'].mean():.2f}×
-                - Average Confidence: {filtered_df['confidence_score'].mean():.2f if 'confidence_score' in filtered_df.columns else 'N/A'}
-                
-                ## Top Performers
-                ### By Enhancement Factor:
-                {filtered_df.groupby('dopant')['enhancement_factor'].mean().nlargest(5).to_string()}
-                
-                ### By Number of Studies:
-                {filtered_df['dopant'].value_counts().head(5).to_string()}
-                
-                ## Data Preview (First 10 rows)
-                {filtered_df.head(10).to_string()}
-                """
-                st.download_button(
-                    "📄 Text Report",
-                    report,
-                    f"dopant_report_{st.session_state.current_query_id}.txt",
-                    "text/plain",
-                    use_container_width=True,
-                    key="export_report"
-                )
         
-        # Tab 7: Advanced Settings
-        with tabs[6]:
+        # Tab 6: Advanced Settings
+        with tabs[5]:
             st.markdown("### ⚙️ Advanced Configuration")
             
             config_tabs = st.tabs([
                 "🎨 Visualization Settings",
                 "🔬 Analysis Parameters",
-                "📊 Export Settings",
                 "⚡ Performance"
             ])
             
@@ -2626,19 +2359,15 @@ def main():
                 with col1:
                     fig_width = st.number_input("Figure Width (px)", 600, 2000, 900, 100, key="config_width")
                     fig_height = st.number_input("Figure Height (px)", 400, 1500, 700, 100, key="config_height")
-                    font_size = st.number_input("Font Size", 8, 24, 14, 1, key="config_font")
                 
                 with col2:
                     theme = st.selectbox("Plot Theme", ["plotly_white", "plotly_dark", "ggplot2", "seaborn"], 
                                        key="config_theme")
-                    color_scale = st.selectbox("Color Scale", ["Viridis", "Plasma", "Inferno", "Magma", "RdYlBu"],
-                                             key="config_colorscale")
                 
                 # Update config
                 Config.PLOT_CONFIG.update({
                     "width": fig_width,
                     "height": fig_height,
-                    "font_size": font_size,
                     "template": theme
                 })
                 
@@ -2651,27 +2380,13 @@ def main():
                 # Keyword customization
                 st.markdown("##### Custom Keywords for Extraction")
                 
-                keyword_col1, keyword_col2 = st.columns(2)
-                
-                with keyword_col1:
-                    st.markdown("**Dopant Keywords**")
-                    custom_dopants = st.text_area(
-                        "Add custom dopant names (one per line)",
-                        value="",
-                        height=150,
-                        key="custom_dopants",
-                        help="Add dopants not in the default list"
-                    )
-                
-                with keyword_col2:
-                    st.markdown("**Property Keywords**")
-                    custom_props = st.text_area(
-                        "Add custom property keywords (one per line)",
-                        value="",
-                        height=150,
-                        key="custom_props",
-                        help="Add property terms for extraction"
-                    )
+                custom_dopants = st.text_area(
+                    "Add custom dopant names (one per line)",
+                    value="",
+                    height=150,
+                    key="custom_dopants",
+                    help="Add dopants not in the default list"
+                )
                 
                 if custom_dopants:
                     new_dopants = [d.strip() for d in custom_dopants.split('\n') if d.strip()]
@@ -2681,73 +2396,25 @@ def main():
                     st.success("Keywords updated! Re-run analysis to apply.")
             
             with config_tabs[2]:
-                st.markdown("#### Export Configuration")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    export_dpi = st.selectbox("Image DPI", [150, 300, 600, 1200], index=1, key="export_dpi")
-                    export_format = st.selectbox("Default Format", ["PNG", "PDF", "SVG", "JPEG"], key="export_format")
-                
-                with col2:
-                    include_metadata = st.checkbox("Include metadata in exports", value=True, key="export_meta")
-                    auto_save = st.checkbox("Auto-save generated figures", value=False, key="export_auto")
-                
-                if st.button("🚀 Configure Export", key="config_export"):
-                    st.info(f"Export configured: {export_dpi} DPI, {export_format} format")
-            
-            with config_tabs[3]:
                 st.markdown("#### Performance Optimization")
                 
                 # Cache settings
                 st.markdown("##### Caching Strategy")
                 cache_size = st.slider("Cache Size (MB)", 10, 1000, 100, 10, key="cache_size")
-                use_memoization = st.checkbox("Enable memoization", value=True, key="cache_memo")
                 
                 # Memory management
                 st.markdown("##### Memory Management")
                 max_memory = st.slider("Max Memory Usage (GB)", 1, 16, 4, 1, key="memory_max")
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    clear_cache = st.button("🧹 Clear Cache", key="clear_cache")
-                with col2:
-                    optimize_db = st.button("⚡ Optimize Database", key="optimize_db")
+                clear_cache = st.button("🧹 Clear Cache", key="clear_cache")
                 
                 if clear_cache:
                     st.session_state.cache_manager.clear()
                     st.cache_data.clear()
                     st.success("Cache cleared!")
-                
-                if optimize_db:
-                    st.info("Database optimization would run here in production")
-        
-        # Tab 8: Performance Metrics
-        with tabs[7]:
-            st.markdown("### ⚡ Performance Metrics")
-            st.session_state.performance_monitor.display_stats()
-            
-            # Engine-specific metrics
-            st.markdown("### Engine Performance")
-            engine_metrics = st.session_state.analysis_engine.performance_monitor.get_stats()
-            if engine_metrics:
-                df = pd.DataFrame.from_dict(engine_metrics, orient='index')
-                st.dataframe(df.style.format({
-                    'mean': '{:.4f}',
-                    'std': '{:.4f}',
-                    'min': '{:.4f}',
-                    'max': '{:.4f}'
-                }))
-            else:
-                st.info("No engine performance metrics recorded yet.")
-            
-            # Cache statistics
-            st.markdown("### Cache Statistics")
-            cache_info = st.session_state.cache_manager.get_cache_info()
-            cache_df = pd.DataFrame([cache_info])
-            st.dataframe(cache_df, use_container_width=True)
     
     else:
-        # Enhanced welcome screen with integrated features showcase
+        # Welcome screen with integrated features showcase
         st.markdown("""
         <div style="
             padding: 3rem; 
@@ -2769,72 +2436,35 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Feature comparison table
-        st.markdown("### 🎯 Integrated Features")
-        
-        features_comparison = pd.DataFrame({
-            "Feature": [
-                "Robust Schema Detection", 
-                "Query Dataset Support", 
-                "Publication-Quality Visualizations",
-                "Confidence Scoring",
-                "Multi-Format Export",
-                "Performance Monitoring",
-                "Advanced 3D Analysis",
-                "Concentration Heatmaps"
-            ],
-            "Previous Version": ["✅", "❌", "✅", "❌", "✅", "❌", "✅", "✅"],
-            "Current Version": ["✅", "✅", "✅", "✅", "✅", "✅", "✅", "✅"]
-        })
-        
-        st.dataframe(features_comparison, use_container_width=True, hide_index=True)
-        
         # Getting started guide
-        with st.expander("🚀 Getting Started Guide", expanded=True):
-            st.markdown("""
-            ### Quick Start Instructions
-            
-            **1. Database Setup**
-            - Place your database files in the `knowledge_database/` directory
-            - Files should follow naming: `piezoelectricity{qX}_metadata.db` (q0, q1, etc.)
-            - Or use custom file paths with the custom database option
-            
-            **2. Query Dataset Selection**
-            - Select query dataset (q0 = default, q1 = query1, etc.)
-            - Different datasets contain different research focuses
-            - The system automatically detects available datasets
-            
-            **3. Robust Data Loading**
-            - Automatic schema detection and column mapping
-            - Multiple fallback levels for problematic databases
-            - Schema analysis and migration helpers
-            
-            **4. Advanced Analysis**
-            - Interactive hierarchical sunburst charts
-            - Multi-property radar comparisons
-            - 3D visualization of dopant effects
-            - Concentration optimization heatmaps
-            
-            **5. Publication-Ready Output**
-            - High-resolution PNG/PDF/SVG export
-            - Multiple data formats (CSV, Excel, JSON)
-            - Comprehensive reports with statistics
-            
-            ### System Requirements
-            
-            - **Python 3.8+** with required packages
-            - **4GB RAM minimum** (8GB recommended for large datasets)
-            - **500MB disk space** for databases and exports
-            - **Modern web browser** with WebGL support for 3D visualizations
-            
-            ### Database Compatibility
-            
-            The tool supports:
-            - SQLite databases with various schemas
-            - Automatic column name detection
-            - Multiple table structures (papers, documents, metadata, etc.)
-            - Graceful degradation with fallback queries
-            """)
+        st.markdown("### 🚀 Getting Started Guide")
+        st.markdown("""
+        **1. Database Setup**
+        - Place your database files in the `knowledge_database/` directory
+        - Files should follow naming: `piezoelectricity{qX}_metadata.db` (q0, q1, etc.)
+        - Or use custom file paths with the custom database option
+        
+        **2. Query Dataset Selection**
+        - Select query dataset (q0 = default, q1 = query1, etc.)
+        - Different datasets contain different research focuses
+        - The system automatically detects available datasets
+        
+        **3. Robust Data Loading**
+        - Automatic schema detection and column mapping
+        - Multiple fallback levels for problematic databases
+        - Schema analysis and migration helpers
+        
+        **4. Advanced Analysis**
+        - Interactive hierarchical sunburst charts
+        - Multi-property radar comparisons
+        - 3D visualization of dopant effects
+        - Concentration optimization heatmaps
+        
+        **5. Publication-Ready Output**
+        - High-resolution PNG/PDF/SVG export
+        - Multiple data formats (CSV, Excel, JSON)
+        - Comprehensive reports with statistics
+        """)
         
         # Sample data option
         if st.checkbox("✅ Use sample data for demonstration", value=True):
