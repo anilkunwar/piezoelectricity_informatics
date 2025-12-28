@@ -146,11 +146,11 @@ def get_table_download_link(df, filename, text):
     """Generate a download link for DataFrame"""
     csv = df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="file/csv;base64,{b64}" download="{filename}" class="download-btn">{text}</a>'
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" class="download-btn">{text}</a>'
     return href
 
 # ==============================
-# PERFORMANCE MONITOR CLASS
+# PERFORMANCE MONITOR CLASS (from Code B)
 # ==============================
 class PerformanceMonitor:
     """Monitors and logs performance metrics for the application"""
@@ -236,7 +236,7 @@ class PerformanceMonitor:
             st.plotly_chart(fig, use_container_width=True)
 
 # ==============================
-# CACHE MANAGER CLASS
+# CACHE MANAGER CLASS (from Code B)
 # ==============================
 class CacheManager:
     """Manages caching of expensive operations with TTL and size limits"""
@@ -291,7 +291,7 @@ class CacheManager:
         return 0.85
 
 # ==============================
-# QUERY-BASED DATABASE PATH HANDLING
+# QUERY-BASED DATABASE PATH HANDLING (from Code B)
 # ==============================
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_DIR = os.path.join(DB_DIR, "knowledge_database")
@@ -310,7 +310,7 @@ def get_db_paths_for_query(query_id: str = "q0") -> dict:
     }
 
 class Config:
-    """Enhanced configuration with query support and publication settings"""
+    """Enhanced configuration with query support"""
     DEFAULT_QUERY_ID = "q0"
     DEFAULT_DB_PATHS = get_db_paths_for_query(DEFAULT_QUERY_ID)
 
@@ -325,14 +325,7 @@ class Config:
                 query_datasets.append(query_id)
         return query_datasets
 
-    COLOR_PALETTES = {
-        "nature": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000"],
-        "science": ["#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD", "#8C564B", "#E377C2", "#7F7F7F"],
-        "material_science": ["#3A6EA5", "#FF6B35", "#004E89", "#FFA400", "#6699CC", "#FF7F50", "#33658A", "#FF9F1C"],
-        "categorical_10": ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-                           "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-    }
-
+    # Enhanced dopant classification
     DOPANT_CATEGORIES = {
         "Metal Oxides": ["ZnO", "BaTiO₃", "TiO₂", "SnO₂", "Al₂O₃", "Fe₂O₃", "CuO", "MgO", "CaO", "ZrO₂"],
         "Carbon-Based": ["CNT", "Graphene", "Carbon Black", "Graphene Oxide", "Reduced Graphene Oxide", "Carbon Nanofibers"],
@@ -382,7 +375,14 @@ class Config:
         "Polymers": "#9467BD",
         "Nanoparticles": "#8C564B",
         "Ionic Liquids": "#E377C2",
-        "Others": "#7F7F7F"
+        "Others_cat": "#7F7F7F"
+    }
+
+    COLOR_PALETTES = {
+        "nature": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000"],
+        "science": ["#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD", "#8C564B", "#E377C2", "#7F7F7F"],
+        "material_science": ["#3A6EA5", "#FF6B35", "#004E89", "#FFA400", "#6699CC", "#FF7F50", "#33658A", "#FF9F1C"],
+        "categorical_10": ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
     }
 
     PLOT_CONFIG = {
@@ -399,7 +399,7 @@ class Config:
     }
 
 # ==============================
-# DATABASE MANAGER WITH QUERY SUPPORT
+# DATABASE MANAGER WITH QUERY SUPPORT (from Code B)
 # ==============================
 class DatabaseManager:
     """Manages database connections with enhanced error handling and dynamic schema detection"""
@@ -488,6 +488,7 @@ class DatabaseManager:
                 break
 
         if not target_table:
+            # Fallback: any table with text-like column
             for table in tables:
                 cols = self.get_columns(table)
                 if any(col in cols for col in ['title', 'abstract', 'content', 'text']):
@@ -526,6 +527,7 @@ class DatabaseManager:
         if 'year' not in available_columns and 'date' in available_columns:
             column_mapping['date'] = 'year'
 
+        # Build query
         select_clause = ", ".join([f"{col} AS {column_mapping[col]}" if col in column_mapping else col for col in select_columns])
         where_clauses = []
         if text_column:
@@ -544,6 +546,7 @@ class DatabaseManager:
 
         try:
             df = pd.read_sql_query(query, self.conn)
+            # Post-process
             if 'date' in df.columns and 'year' not in df.columns:
                 try:
                     df['year'] = pd.to_datetime(df['date']).dt.year
@@ -592,7 +595,7 @@ class DatabaseManager:
                         st.markdown("**Sample Data (first 3 rows):**")
                         st.dataframe(sample_df)
                     except Exception as e:
-                        st.warning(f"Could not fetch sample: {e}")
+                        st.warning(f"Could not fetch sample data: {e}")
 
         total_tables = len(schema)
         total_columns = sum(len(cols) for cols in schema.values())
@@ -607,7 +610,6 @@ class DatabaseManager:
                 if any(kw in col.lower() for kw in ['text', 'content', 'abstract', 'full']):
                     text_columns.append(f"{table}.{col}")
         if text_columns:
-            st.markdown("### 📝 Text Content Columns")
             for col in text_columns:
                 st.markdown(f"- `{col}`")
         else:
@@ -616,7 +618,7 @@ class DatabaseManager:
         return schema
 
 # ==============================
-# ENHANCED DOPANT ANALYSIS ENGINE
+# ENHANCED DOPANT ANALYSIS ENGINE (from Code A, enhanced with query-aware logic)
 # ==============================
 class EnhancedDopantAnalysisEngine:
     """Enhanced analysis engine with publication-quality visualizations"""
@@ -739,6 +741,7 @@ class EnhancedDopantAnalysisEngine:
                 return method.title()
         return "Unknown"
 
+    # --- All enhanced visualization methods from Code A ---
     def create_publication_sunburst(self, relationships_df: pd.DataFrame,
                                     title: str = "Hierarchical Analysis of Dopant Effects",
                                     show_values: bool = True,
@@ -836,7 +839,7 @@ class EnhancedDopantAnalysisEngine:
                 values = [data.get(prop, 1.0) for data in radar_data.values()]
                 max_val = max(values)
                 if max_val > 1.0:
-                    for dopant in radar_data:
+                    for dopant in radar_
                         if prop in radar_data[dopant]:
                             radar_data[dopant][prop] = radar_data[dopant][prop] / max_val * 2.0
 
@@ -853,7 +856,7 @@ class EnhancedDopantAnalysisEngine:
                 name=dopant,
                 line=dict(color=colors[i], width=3 if i == 0 else 2, dash='solid' if i == 0 else 'dash'),
                 marker=dict(size=8, symbol='circle', line=dict(width=1, color='white')),
-                hovertemplate=f"<b>{dopant}</b><br>%{theta}: %{r:.2f}×<br><extra></extra>",
+                hovertemplate=f"<b>{dopant}</b><br>%{{theta}}: %{{r:.2f}}×<br><extra></extra>",
                 opacity=0.9
             ))
 
@@ -939,7 +942,7 @@ class EnhancedDopantAnalysisEngine:
                 name=category,
                 marker=dict(size=8, color=self.colors.get(category, '#666666'), opacity=0.7, line=dict(width=1, color='white')),
                 text=cat_data['dopant'] + '<br>' + cat_data['base_material'],
-                hovertemplate=f"<b>%{text}</b><br>{top_properties[0]}: %{{x:.1f}}<br>{top_properties[1]}: %{{y:.1f}}<br>{top_properties[2]}: %{{z:.1f}}<br><extra></extra>"
+                hovertemplate=f"<b>%{{text}}</b><br>{top_properties[0]}: %{{x:.1f}}<br>{top_properties[1]}: %{{y:.1f}}<br>{top_properties[2]}: %{{z:.1f}}<br><extra></extra>"
             ))
         fig.update_layout(
             title={'text': title, 'y': 0.95, 'x': 0.5, 'xanchor': 'center', 'yanchor': 'top', 'font': dict(size=22, family='Arial', color='#1E3A8A')},
@@ -1011,7 +1014,7 @@ class EnhancedDopantAnalysisEngine:
         app_criteria = {
             "Energy Harvesting": {'d₃₃ (pC/N)': 2.0, 'Voltage Output (V)': 1.8, 'Power Density (μW/cm²)': 2.0},
             "Sensors": {'d₃₃ (pC/N)': 1.7, 'Dielectric Constant': 1.8, 'Curie Temp (°C)': 1.5},
-            "Actuators": {'d₃₃ (pC/N)': 1.8, "Young's Modulus (GPa)": 1.7},
+            "Actuators": {'d₃₃ (pC/N)': 1.8, 'Young\'s Modulus (GPa)': 1.7},
             "High Temperature": {'Curie Temp (°C)': 2.0, 'Dielectric Constant': 1.8},
             "Flexible Electronics": {'β-phase (%)': 2.0, 'Dielectric Constant': 1.8},
             "Biomedical": {'Biocompatibility': 1.9, 'β-phase (%)': 1.7}
@@ -1050,7 +1053,7 @@ class EnhancedDopantAnalysisEngine:
         return recommendations
 
 # ==============================
-# SAMPLE DATA GENERATION FOR QUERIES
+# SAMPLE DATA GENERATION FOR QUERIES (from Code B, enhanced with Code A realism)
 # ==============================
 def create_sample_data_for_query(query_id: str = "q0"):
     st.info(f"💡 Creating comprehensive sample data for Query {query_id}...")
@@ -1137,7 +1140,7 @@ def create_sample_data_for_query(query_id: str = "q0"):
     return relationships_df, focus_area
 
 # ==============================
-# MAIN APPLICATION
+# MAIN APPLICATION (Code A UI + Code B query logic)
 # ==============================
 def main():
     st.markdown('<h1 class="main-header">🔬 Dopant Impact Explorer Pro</h1>', unsafe_allow_html=True)
@@ -1261,6 +1264,7 @@ def main():
             "🔍 Data Explorer", "⚙️ Advanced Settings"
         ])
 
+        # Tab 1: Sunburst
         with tabs[0]:
             col1, col2, col3 = st.columns(3)
             with col1: max_depth = st.slider("Depth", 2, 5, 4)
@@ -1269,6 +1273,7 @@ def main():
             fig = engine.create_publication_sunburst(relationships_df, show_values=show_values, max_depth=max_depth)
             if fig: st.plotly_chart(fig, use_container_width=True)
 
+        # Tab 2: Radar
         with tabs[1]:
             all_dopants = relationships_df['dopant'].unique().tolist()
             default = relationships_df['dopant'].value_counts().head(4).index.tolist()
@@ -1277,20 +1282,24 @@ def main():
                 fig = engine.create_enhanced_radar_chart(relationships_df, selected)
                 if fig: st.plotly_chart(fig, use_container_width=True)
 
+        # Tab 3: Heatmap
         with tabs[2]:
             fig = engine.create_concentration_heatmap(relationships_df)
             if fig: st.plotly_chart(fig, use_container_width=True)
 
+        # Tab 4: 3D
         with tabs[3]:
             fig = engine.create_3d_scatter_plot(relationships_df)
             if fig: st.plotly_chart(fig, use_container_width=True)
 
+        # Tab 5: Dashboard
         with tabs[4]:
             dashboard_dopants = st.multiselect("Dashboard Dopants", options=relationships_df['dopant'].unique().tolist(), default=relationships_df['dopant'].value_counts().head(3).index.tolist(), max_selections=5)
             if len(dashboard_dopants) >= 2:
                 fig = engine.create_comparison_dashboard(relationships_df, dashboard_dopants)
                 if fig: st.plotly_chart(fig, use_container_width=True)
 
+        # Tab 6: Recommendations
         with tabs[5]:
             app = st.selectbox("Application", [
                 "Energy Harvesting", "Sensors", "Actuators", "High Temperature", "Flexible Electronics", "Biomedical"
@@ -1308,11 +1317,13 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
 
+        # Tab 7: Data Explorer
         with tabs[6]:
             st.dataframe(relationships_df, use_container_width=True, height=500)
             csv = relationships_df.to_csv().encode('utf-8')
             st.download_button("Download CSV", csv, "dopant.csv", "text/csv")
 
+        # Tab 8: Settings
         with tabs[7]:
             st.text("Advanced settings (e.g., custom keywords) can be added here.")
 
