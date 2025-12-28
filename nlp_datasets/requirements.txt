@@ -31,3 +31,4 @@ pymatgen
 PubChemPy
 openpyxl
 SciencePlots
+textacy
