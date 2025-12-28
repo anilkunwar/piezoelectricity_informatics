@@ -59,3 +59,9 @@ Text based data extraction from web using attention mechanism
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc1-streamlit-red)](https://piezoelectric-databasevisualization1.streamlit.app/)  
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc2-streamlit-red)](https://piezoelectric-databasevisualization2.streamlit.app/)  
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc3-streamlit-red)](https://piezoelectric-databasevisualization3.streamlit.app/)  
+
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc4-streamlit-red)](https://piezoelectric-databasevisualization4.streamlit.app/)  
+
+
