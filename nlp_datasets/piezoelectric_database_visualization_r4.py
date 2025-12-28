@@ -12,13 +12,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
+import matplotlib
 from collections import Counter
-import spacy
-from spacy import displacy
-import textacy.extract
-from wordcloud import WordCloud
 import warnings
 warnings.filterwarnings('ignore')
+
+# Set matplotlib backend and style
+matplotlib.use('Agg')
+plt.style.use('default')
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -83,11 +84,29 @@ st.markdown("""
     font-size: 1rem;
     font-weight: 600;
 }
+.parameter-box {
+    background: white;
+    padding: 1rem;
+    border-radius: 8px;
+    border-left: 4px solid #3B82F6;
+    margin: 0.5rem 0;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.stat-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    margin: 2px;
+    border-radius: 15px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background-color: #E5E7EB;
+    color: #4B5563;
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================
-# DATABASE LOADER (Same as previous code)
+# DATABASE LOADER
 # ==============================
 class DatabaseManager:
     """Manages database connections for loading papers data"""
@@ -170,39 +189,65 @@ class QuantitativeNERAnalyzer:
         # Regular expressions for quantitative parameter extraction
         self.patterns = {
             'd33': [
-                r'd33[:\s]*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
-                r'piezoelectric coefficient[:\s]*([\d\.]+)\s*(?:pC/N|pC N⁻¹)',
-                r'd₃₃[:\s]*([\d\.]+)\s*(?:pC/N|pC N⁻¹)',
-                r'([\d\.]+)\s*(?:pC/N|pC N⁻¹).*d33',
-                r'd33.*?([\d\.]+)\s*(?:pC/N|pC N⁻¹)'
+                r'd33[:\s]*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V|pC/N⁻¹)',
+                r'piezoelectric coefficient[:\s]*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd₃₃[:\s]*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V).*d33',
+                r'd33.*?([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd33\s*=\s*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd33.*?of\s*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd33.*?value.*?([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'([\d\.]+)\s*pC/N.*?d33',
+                r'd33.*?approximately\s*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd33.*?reached\s*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd33.*?was\s*([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)',
+                r'd33.*?measured.*?([\d\.]+)\s*(?:pC/N|pC N⁻¹|pm/V)'
             ],
             'beta_phase': [
                 r'beta.*?phase.*?([\d\.]+)\s*%',
                 r'β-phase.*?([\d\.]+)\s*%',
                 r'([\d\.]+)\s*%.*?beta.*?phase',
-                r'ferroelectric phase.*?([\d\.]+)\s*%'
+                r'ferroelectric phase.*?([\d\.]+)\s*%',
+                r'β.*?content.*?([\d\.]+)\s*%',
+                r'beta.*?content.*?([\d\.]+)\s*%',
+                r'([\d\.]+)\s*%.*?β.*?phase',
+                r'phase.*?content.*?([\d\.]+)\s*%'
             ],
             'concentration': [
                 r'([\d\.]+)\s*(?:wt|wt\.|weight)\s*%',
                 r'([\d\.]+)\s*(?:vol|vol\.|volume)\s*%',
                 r'([\d\.]+)\s*(?:mol|mol\.|molar)\s*%',
-                r'([\d\.]+)\s*%.*?(?:doping|addition|loading)',
-                r'concentration.*?([\d\.]+)\s*%'
+                r'([\d\.]+)\s*%.*?(?:doping|addition|loading|content)',
+                r'concentration.*?([\d\.]+)\s*%',
+                r'([\d\.]+)\s*%.*?filler',
+                r'([\d\.]+)\s*%.*?dopant',
+                r'doping.*?([\d\.]+)\s*%',
+                r'([\d\.]+)\s*weight percent',
+                r'([\d\.]+)\s*wt\.?\s*percent'
             ],
             'voltage': [
                 r'([\d\.]+)\s*(?:V|volt).*?output',
                 r'voltage.*?([\d\.]+)\s*(?:V|volt)',
-                r'output.*?([\d\.]+)\s*(?:V|volt)'
+                r'output.*?([\d\.]+)\s*(?:V|volt)',
+                r'([\d\.]+)\s*V.*?generated',
+                r'([\d\.]+)\s*V.*?produced',
+                r'open.*?circuit.*?voltage.*?([\d\.]+)\s*(?:V|volt)',
+                r'ocv.*?([\d\.]+)\s*(?:V|volt)'
             ],
             'dielectric': [
                 r'dielectric.*?constant.*?([\d\.]+)',
                 r'permittivity.*?([\d\.]+)',
-                r'εr.*?([\d\.]+)'
+                r'εr.*?([\d\.]+)',
+                r'([\d\.]+).*?dielectric.*?constant',
+                r'dielectric.*?([\d\.]+)\s*(?:at|@)',
+                r'relative.*?permittivity.*?([\d\.]+)'
             ],
             'youngs_modulus': [
                 r'young.*?modulus.*?([\d\.]+)\s*(?:GPa|MPa)',
                 r'([\d\.]+)\s*(?:GPa|MPa).*?young',
-                r'elastic modulus.*?([\d\.]+)\s*(?:GPa|MPa)'
+                r'elastic modulus.*?([\d\.]+)\s*(?:GPa|MPa)',
+                r'tensile.*?modulus.*?([\d\.]+)\s*(?:GPa|MPa)',
+                r'mechanical.*?modulus.*?([\d\.]+)\s*(?:GPa|MPa)'
             ]
         }
         
@@ -210,7 +255,7 @@ class QuantitativeNERAnalyzer:
         self.units = {
             'd33': 'pC/N',
             'beta_phase': '%',
-            'concentration': '%',
+            'concentration': 'wt%',
             'voltage': 'V',
             'dielectric': 'εr',
             'youngs_modulus': 'GPa'
@@ -220,7 +265,7 @@ class QuantitativeNERAnalyzer:
         self.property_names = {
             'd33': 'd₃₃ Coefficient (pC/N)',
             'beta_phase': 'β-Phase Content (%)',
-            'concentration': 'Dopant Concentration (%)',
+            'concentration': 'Dopant Concentration (wt%)',
             'voltage': 'Output Voltage (V)',
             'dielectric': 'Dielectric Constant (εr)',
             'youngs_modulus': "Young's Modulus (GPa)"
@@ -246,14 +291,6 @@ class QuantitativeNERAnalyzer:
             "Nanoparticles": "#8C564B",
             "Others": "#7F7F7F"
         }
-        
-        # Initialize spaCy if available
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-            self.spacy_available = True
-        except:
-            self.spacy_available = False
-            logger.warning("spaCy not available. Using regex-based NER only.")
     
     def is_pvdf_related(self, text: str) -> bool:
         """Check if text is related to PVDF"""
@@ -319,16 +356,27 @@ class QuantitativeNERAnalyzer:
         for category, dopants in self.dopant_categories.items():
             for dopant in dopants:
                 if dopant in context:
-                    return dopant
+                    # Try to get the full dopant name
+                    start = max(0, context.find(dopant) - 20)
+                    end = min(len(context), context.find(dopant) + len(dopant) + 20)
+                    dopant_text = context[start:end]
+                    
+                    # Clean and return
+                    clean_dopant = self._clean_dopant_name(dopant_text)
+                    if clean_dopant:
+                        return clean_dopant
         return None
     
     def _categorize_dopant(self, dopant: str) -> Optional[str]:
         """Categorize dopant into predefined categories"""
+        if not dopant:
+            return None
+        
         dopant_lower = dopant.lower()
         for category, dopants in self.dopant_categories.items():
             if any(d in dopant_lower for d in dopants):
                 return category
-        return None
+        return "Others"
     
     def _extract_sentence(self, text: str, start: int, end: int) -> str:
         """Extract full sentence containing the match"""
@@ -349,26 +397,48 @@ class QuantitativeNERAnalyzer:
         """Extract specific dopant-concentration pairs"""
         results = []
         
-        # Pattern for dopant followed by concentration
+        # Enhanced patterns for dopant-concentration extraction
         patterns = [
-            r'([a-zA-Z\s\d\(\)\-]+)\s*(?:doping|addition|loading|filler).*?([\d\.]+)\s*(?:wt|wt\.|weight)\s*%',
-            r'([\d\.]+)\s*(?:wt|wt\.|weight)\s*%.*?([a-zA-Z\s\d\(\)\-]+)(?:doping|addition|loading|filler)',
-            r'([a-zA-Z\s\d\(\)\-]+)\s*\(([\d\.]+)\s*(?:wt|wt\.|weight)\s*%\)',
-            r'([a-zA-Z\s\d\(\)\-]+).*?concentration.*?([\d\.]+)\s*%'
+            # Pattern: Dopant (X wt%)
+            r'([a-zA-Z\s\d\(\)\-/]+)\s*\(([\d\.]+)\s*(?:wt|wt\.|weight)\s*%\)',
+            # Pattern: X wt% Dopant
+            r'([\d\.]+)\s*(?:wt|wt\.|weight)\s*%\s*([a-zA-Z\s\d\(\)\-/]+)',
+            # Pattern: Dopant with X wt%
+            r'([a-zA-Z\s\d\(\)\-/]+)\s*with\s*([\d\.]+)\s*(?:wt|wt\.|weight)\s*%',
+            # Pattern: Dopant content of X wt%
+            r'([a-zA-Z\s\d\(\)\-/]+)\s*content.*?([\d\.]+)\s*(?:wt|wt\.|weight)\s*%',
+            # Pattern: X wt% of Dopant
+            r'([\d\.]+)\s*(?:wt|wt\.|weight)\s*%\s*of\s*([a-zA-Z\s\d\(\)\-/]+)',
+            # Pattern: Dopant-doped at X wt%
+            r'([a-zA-Z\s\d\(\)\-/]+).*?doped.*?([\d\.]+)\s*(?:wt|wt\.|weight)\s*%',
+            # Pattern: Dopant concentration X wt%
+            r'([a-zA-Z\s\d\(\)\-/]+)\s*concentration.*?([\d\.]+)\s*(?:wt|wt\.|weight)\s*%'
         ]
         
         for pattern in patterns:
             matches = re.finditer(pattern, text, re.IGNORECASE)
             for match in matches:
                 try:
-                    dopant = match.group(1).strip()
-                    concentration = float(match.group(2))
+                    # Try both group orders
+                    try:
+                        dopant = match.group(1).strip()
+                        concentration = float(match.group(2))
+                    except:
+                        # Try reverse order
+                        dopant = match.group(2).strip()
+                        concentration = float(match.group(1))
                     
                     # Clean dopant name
                     dopant = self._clean_dopant_name(dopant)
-                    category = self._categorize_dopant(dopant)
                     
-                    if concentration <= 100:  # Reasonable concentration check
+                    # Skip if dopant is obviously not a material
+                    invalid_indicators = ['content', 'concentration', 'doped', 'weight', 'wt', 'percent', '%']
+                    if any(indicator in dopant.lower() for indicator in invalid_indicators):
+                        continue
+                    
+                    if dopant and 0.001 <= concentration <= 100:  # Reasonable concentration range
+                        category = self._categorize_dopant(dopant)
+                        
                         results.append({
                             'dopant': dopant,
                             'concentration': concentration,
@@ -376,40 +446,68 @@ class QuantitativeNERAnalyzer:
                             'category': category,
                             'paper_id': paper_id
                         })
-                except (ValueError, IndexError):
+                except (ValueError, IndexError, AttributeError):
                     continue
         
         return results
     
     def _clean_dopant_name(self, dopant: str) -> str:
         """Clean and standardize dopant names"""
-        dopant = dopant.lower().strip()
+        if not dopant:
+            return ""
         
-        # Remove common prefixes/suffixes
-        removals = ['nanoparticles', 'nanoparticle', 'nps', 'nanocomposite', 
-                   'composite', 'doped', 'doping', 'added', 'addition']
+        dopant = dopant.strip()
+        
+        # Remove common prefixes/suffixes and unwanted characters
+        removals = [
+            'nanoparticles', 'nanoparticle', 'nps', 'np', 'nanocomposite', 
+            'composite', 'doped', 'doping', 'added', 'addition', 'content',
+            'concentration', 'with', 'of', 'and', 'the', 'a', 'an', 'at',
+            'weight', 'wt', 'percent', '%', '(', ')', '[', ']', '{', '}',
+            '  ', '   '
+        ]
+        
         for removal in removals:
-            dopant = dopant.replace(removal, '').strip()
+            dopant = re.sub(r'\b' + re.escape(removal) + r'\b', '', dopant, flags=re.IGNORECASE)
+            dopant = dopant.replace(removal, '')
+        
+        # Remove extra spaces and special characters
+        dopant = re.sub(r'\s+', ' ', dopant).strip()
+        dopant = dopant.strip(' ,.-_/')
         
         # Standardize common dopants
         replacements = {
-            'cnts': 'cnt',
-            'carbon nanotubes': 'cnt',
-            'multi-walled carbon nanotubes': 'mwcnt',
-            'graphene oxide': 'go',
-            'reduced graphene oxide': 'rgo',
-            'titanium dioxide': 'tio2',
-            'zinc oxide': 'zno',
-            'barium titanate': 'batio3',
-            'lead zirconate titanate': 'pzt'
+            'cnts': 'CNT',
+            'carbon nanotubes': 'CNT',
+            'multi-walled carbon nanotubes': 'MWCNT',
+            'multi walled carbon nanotubes': 'MWCNT',
+            'graphene oxide': 'GO',
+            'reduced graphene oxide': 'RGO',
+            'titanium dioxide': 'TiO₂',
+            'zinc oxide': 'ZnO',
+            'barium titanate': 'BaTiO₃',
+            'lead zirconate titanate': 'PZT',
+            'molybdenum disulfide': 'MoS₂',
+            'silver nanoparticles': 'Ag NPs',
+            'silver nps': 'Ag NPs'
         }
         
+        dopant_lower = dopant.lower()
         for old, new in replacements.items():
-            if old in dopant:
+            if old in dopant_lower:
                 dopant = new
                 break
         
-        return dopant.title()
+        # Capitalize properly
+        if dopant and not any(c.isupper() for c in dopant):
+            # For chemical formulas, keep as is
+            if re.match(r'^[a-z0-9]+$', dopant, re.IGNORECASE):
+                dopant = dopant.upper()
+            else:
+                # For names, title case
+                dopant = dopant.title()
+        
+        return dopant
     
     def analyze_papers_batch(self, papers_df: pd.DataFrame, text_column: str = 'abstract') -> Dict[str, Any]:
         """Analyze batch of papers and extract quantitative parameters"""
@@ -418,17 +516,27 @@ class QuantitativeNERAnalyzer:
             'dopants': [],
             'papers_analyzed': 0,
             'papers_with_pvdf': 0,
-            'papers_with_quantitative_data': 0
+            'papers_with_quantitative_data': 0,
+            'total_extractions': 0
         }
         
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         for idx, row in papers_df.iterrows():
-            paper_id = row.get('paper_id', idx)
-            text = str(row.get(text_column, '') or row.get('full_text', '') or row.get('content', ''))
+            paper_id = row.get('paper_id', f"paper_{idx}")
+            text = str(row.get(text_column, '') or row.get('full_text', '') or 
+                      row.get('content', '') or row.get('abstract', ''))
             
-            if not text or len(text) < 100:
+            if not text or len(text) < 50:
                 continue
             
             all_results['papers_analyzed'] += 1
+            
+            # Update progress
+            progress = min(1.0, all_results['papers_analyzed'] / len(papers_df))
+            progress_bar.progress(progress)
+            status_text.text(f"Analyzing paper {all_results['papers_analyzed']} of {len(papers_df)}...")
             
             # Check if PVDF-related
             if self.is_pvdf_related(text):
@@ -446,10 +554,15 @@ class QuantitativeNERAnalyzer:
                             if param not in all_results['parameters']:
                                 all_results['parameters'][param] = []
                             all_results['parameters'][param].extend(values)
+                            all_results['total_extractions'] += len(values)
                     
                     # Aggregate dopant details
                     if 'dopant_details' in paper_results:
                         all_results['dopants'].extend(paper_results['dopant_details'])
+                        all_results['total_extractions'] += len(paper_results['dopant_details'])
+        
+        progress_bar.empty()
+        status_text.empty()
         
         # Convert to DataFrames for easier analysis
         param_dfs = {}
@@ -481,40 +594,36 @@ class QuantitativeNERAnalyzer:
             hovertemplate='Value: %{x}<br>Count: %{y}<extra></extra>'
         ))
         
-        # Add box plot
-        fig.add_trace(go.Box(
-            x=param_data['value'],
-            name='Statistics',
-            marker_color='#EF4444',
-            boxmean='sd',
-            showlegend=False
-        ))
+        # Calculate statistics
+        mean_val = param_data['value'].mean()
+        median_val = param_data['value'].median()
+        std_val = param_data['value'].std()
         
         fig.update_layout(
-            title=f"Distribution of {self.property_names.get(param_name, param_name)}",
+            title={
+                'text': f"Distribution of {self.property_names.get(param_name, param_name)}",
+                'font': {'size': 20, 'color': '#1E3A8A'}
+            },
             xaxis_title=self.property_names.get(param_name, param_name),
             yaxis_title="Count",
             height=500,
             template="plotly_white",
             showlegend=True,
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-            hoverlabel=dict(bgcolor="white", font_size=12)
-        )
-        
-        # Add summary statistics as annotation
-        mean_val = param_data['value'].mean()
-        median_val = param_data['value'].median()
-        std_val = param_data['value'].std()
-        
-        fig.add_annotation(
-            x=0.02, y=0.98,
-            xref="paper", yref="paper",
-            text=f"Mean: {mean_val:.2f}<br>Median: {median_val:.2f}<br>Std: {std_val:.2f}",
-            showarrow=False,
-            bgcolor="white",
-            bordercolor="gray",
-            borderwidth=1,
-            borderpad=4
+            hoverlabel=dict(bgcolor="white", font_size=12),
+            annotations=[
+                dict(
+                    x=0.02, y=0.98,
+                    xref="paper", yref="paper",
+                    text=f"Mean: {mean_val:.2f}<br>Median: {median_val:.2f}<br>Std: {std_val:.2f}",
+                    showarrow=False,
+                    bgcolor="white",
+                    bordercolor="gray",
+                    borderwidth=1,
+                    borderpad=4,
+                    font=dict(size=12)
+                )
+            ]
         )
         
         return fig
@@ -541,6 +650,10 @@ class QuantitativeNERAnalyzer:
             aggfunc='mean'
         ).fillna(0)
         
+        # Sort by average concentration
+        pivot['avg'] = pivot.mean(axis=1)
+        pivot = pivot.sort_values('avg', ascending=False).drop('avg', axis=1)
+        
         # Create heatmap
         fig = go.Figure(data=go.Heatmap(
             z=pivot.values,
@@ -551,16 +664,53 @@ class QuantitativeNERAnalyzer:
             hovertemplate="Dopant: %{y}<br>Category: %{x}<br>Concentration: %{z:.2f} wt%<br><extra></extra>",
             text=pivot.values.round(2),
             texttemplate="%{text} wt%",
-            textfont=dict(size=10)
+            textfont=dict(size=10, color="white")
         ))
         
         fig.update_layout(
-            title="Dopant Concentration by Category",
+            title={
+                'text': "Dopant Concentration by Category",
+                'font': {'size': 20, 'color': '#1E3A8A'}
+            },
             xaxis_title="Dopant Category",
             yaxis_title="Dopant",
             height=600,
             width=800,
             template="plotly_white"
+        )
+        
+        return fig
+    
+    def create_dopant_concentration_boxplot(self, dopant_df: pd.DataFrame) -> go.Figure:
+        """Create box plot of dopant concentrations by category"""
+        if dopant_df.empty or 'category' not in dopant_df.columns:
+            return None
+        
+        fig = go.Figure()
+        
+        # Get unique categories
+        categories = dopant_df['category'].unique()
+        
+        for category in categories:
+            category_data = dopant_df[dopant_df['category'] == category]['concentration']
+            if len(category_data) > 0:
+                fig.add_trace(go.Box(
+                    y=category_data,
+                    name=category,
+                    marker_color=self.dopant_colors.get(category, '#7F7F7F'),
+                    boxmean='sd'
+                ))
+        
+        fig.update_layout(
+            title={
+                'text': "Dopant Concentration Distribution by Category",
+                'font': {'size': 20, 'color': '#1E3A8A'}
+            },
+            yaxis_title="Concentration (wt%)",
+            xaxis_title="Dopant Category",
+            height=500,
+            template="plotly_white",
+            showlegend=False
         )
         
         return fig
@@ -573,11 +723,15 @@ class QuantitativeNERAnalyzer:
         
         # Calculate average values for each parameter
         param_means = {}
+        param_counts = {}
+        
         for param in selected_params:
             if param in param_dfs and not param_dfs[param].empty:
                 param_means[param] = param_dfs[param]['value'].mean()
+                param_counts[param] = len(param_dfs[param])
             else:
                 param_means[param] = 0
+                param_counts[param] = 0
         
         if not param_means:
             return None
@@ -594,8 +748,11 @@ class QuantitativeNERAnalyzer:
         
         normalized_means = {}
         for param, mean_val in param_means.items():
-            max_val = max_vals.get(param, mean_val * 2 if mean_val > 0 else 1)
-            normalized_means[param] = min(mean_val / max_val, 1.0)
+            if mean_val > 0:
+                max_val = max_vals.get(param, mean_val * 2)
+                normalized_means[param] = min(mean_val / max_val, 1.0)
+            else:
+                normalized_means[param] = 0
         
         # Create radar chart
         categories = [self.property_names.get(p, p) for p in selected_params]
@@ -611,7 +768,9 @@ class QuantitativeNERAnalyzer:
             fillcolor='rgba(59, 130, 246, 0.3)',
             line=dict(color='#3B82F6', width=2),
             name='Average Values',
-            hovertemplate="%{theta}: %{r:.2f} (normalized)<extra></extra>"
+            hovertemplate="%{theta}: %{r:.2f} (normalized)<br>Actual: %{customdata}<extra></extra>",
+            customdata=[f"{param_means[p]:.2f} {self.units.get(p, '')}" for p in selected_params] + 
+                      [f"{param_means[selected_params[0]]:.2f} {self.units.get(selected_params[0], '')}"]
         ))
         
         # Add reference lines
@@ -632,7 +791,8 @@ class QuantitativeNERAnalyzer:
                     range=[0, 1.1],
                     tickvals=[0, 0.25, 0.5, 0.75, 1.0],
                     ticktext=['0', '0.25', '0.5', '0.75', '1.0'],
-                    tickangle=0
+                    tickangle=0,
+                    tickfont=dict(size=12)
                 ),
                 angularaxis=dict(
                     tickfont=dict(size=12),
@@ -640,10 +800,16 @@ class QuantitativeNERAnalyzer:
                 )
             ),
             showlegend=True,
-            title="Normalized Parameter Comparison",
+            title={
+                'text': "Normalized Parameter Comparison",
+                'font': {'size': 20, 'color': '#1E3A8A'}
+            },
             height=600,
             width=700,
-            template="plotly_white"
+            template="plotly_white",
+            legend=dict(
+                font=dict(size=12)
+            )
         )
         
         return fig
@@ -659,6 +825,12 @@ class QuantitativeNERAnalyzer:
         }).reset_index()
         
         hierarchy_data.columns = ['category', 'dopant', 'avg_concentration', 'count']
+        
+        # Filter out categories with too few data points
+        hierarchy_data = hierarchy_data[hierarchy_data['count'] >= 1]
+        
+        if hierarchy_data.empty:
+            return None
         
         # Create sunburst
         fig = px.sunburst(
@@ -680,7 +852,7 @@ class QuantitativeNERAnalyzer:
         
         fig.update_layout(
             template="plotly_white",
-            title_font=dict(size=20),
+            title_font=dict(size=20, color='#1E3A8A'),
             coloraxis_colorbar=dict(
                 title="Concentration (wt%)",
                 thickness=20
@@ -696,12 +868,12 @@ class QuantitativeNERAnalyzer:
         
         for param, df in param_dfs.items():
             if not df.empty:
-                # Take first value per paper for each parameter
-                paper_values = df.groupby('paper_id')['value'].first().reset_index()
+                # Take average value per paper for each parameter
+                paper_values = df.groupby('paper_id')['value'].mean().reset_index()
                 paper_values['parameter'] = param
                 combined_data.append(paper_values[['paper_id', 'parameter', 'value']])
         
-        if not combined_data:
+        if len(combined_data) < 2:
             return None
         
         combined_df = pd.concat(combined_data, ignore_index=True)
@@ -726,17 +898,78 @@ class QuantitativeNERAnalyzer:
             colorbar=dict(title="Correlation"),
             text=corr_matrix.values.round(2),
             texttemplate="%{text}",
-            textfont=dict(size=12),
+            textfont=dict(size=12, color='black'),
             hovertemplate="Parameter X: %{x}<br>Parameter Y: %{y}<br>Correlation: %{z:.2f}<extra></extra>"
         ))
         
         fig.update_layout(
-            title="Parameter Correlation Matrix",
+            title={
+                'text': "Parameter Correlation Matrix",
+                'font': {'size': 20, 'color': '#1E3A8A'}
+            },
             height=600,
             width=700,
             template="plotly_white",
             xaxis_title="Parameters",
             yaxis_title="Parameters"
+        )
+        
+        return fig
+    
+    def create_d33_vs_concentration_scatter(self, param_dfs: Dict[str, pd.DataFrame], 
+                                          dopant_df: pd.DataFrame) -> go.Figure:
+        """Create scatter plot of d33 vs dopant concentration"""
+        if 'd33' not in param_dfs or param_dfs['d33'].empty or dopant_df.empty:
+            return None
+        
+        # Merge d33 data with dopant data by paper_id
+        d33_data = param_dfs['d33'][['paper_id', 'value']].rename(columns={'value': 'd33'})
+        
+        # For papers with multiple d33 values, take average
+        d33_avg = d33_data.groupby('paper_id')['d33'].mean().reset_index()
+        
+        # For dopants, take average concentration per paper
+        dopant_avg = dopant_df.groupby('paper_id')['concentration'].mean().reset_index()
+        
+        # Merge
+        merged = pd.merge(d33_avg, dopant_avg, on='paper_id', how='inner')
+        
+        if merged.empty:
+            return None
+        
+        # Create scatter plot
+        fig = px.scatter(
+            merged,
+            x='concentration',
+            y='d33',
+            trendline='ols',
+            trendline_color_override='red',
+            title='d33 vs Dopant Concentration',
+            labels={
+                'concentration': 'Dopant Concentration (wt%)',
+                'd33': 'd33 Coefficient (pC/N)'
+            },
+            height=500
+        )
+        
+        # Add correlation coefficient
+        correlation = merged['concentration'].corr(merged['d33'])
+        
+        fig.update_layout(
+            annotations=[
+                dict(
+                    x=0.05, y=0.95,
+                    xref="paper", yref="paper",
+                    text=f"Correlation: {correlation:.3f}",
+                    showarrow=False,
+                    bgcolor="white",
+                    bordercolor="gray",
+                    borderwidth=1,
+                    borderpad=4,
+                    font=dict(size=12)
+                )
+            ],
+            template="plotly_white"
         )
         
         return fig
@@ -791,14 +1024,18 @@ def main():
             db_files = [f for f in os.listdir(db_dir) if f.endswith('.db')]
             available_dbs = db_files
         
+        use_sample = False
+        
         if not available_dbs:
-            st.error("No database files found in 'knowledge_database/' directory!")
-            st.info("Please ensure your database files are in the knowledge_database folder.")
+            st.warning("No database files found in 'knowledge_database/' directory!")
+            st.info("You can:")
+            st.markdown("1. Place SQLite database files in `knowledge_database/` folder")
+            st.markdown("2. Use sample data for demonstration")
             use_sample = st.checkbox("Use sample data for demonstration", value=True)
         else:
             selected_db = st.selectbox("Select Database", available_dbs)
             db_path = os.path.join(db_dir, selected_db)
-            use_sample = False
+            use_sample = st.checkbox("Use sample data instead", value=False)
         
         # Analysis parameters
         st.markdown("### 🔬 Analysis Parameters")
@@ -806,30 +1043,33 @@ def main():
         
         text_source = st.selectbox(
             "Text Source for Analysis",
-            ["abstract", "full_text", "title", "content"],
-            index=0
+            ["abstract", "full_text", "content", "title"],
+            index=0,
+            help="Select which text field to analyze for parameter extraction"
         )
         
         # NER settings
         st.markdown("### 🎯 NER Settings")
         extract_dopants = st.checkbox("Extract dopant concentrations", value=True)
-        min_confidence = st.slider("Minimum value confidence", 0.0, 1.0, 0.0, 0.1)
         
         # Actions
         st.markdown("### ⚡ Actions")
         analyze_btn = st.button("🚀 Start NER Analysis", type="primary", use_container_width=True)
         
         if st.button("🔄 Clear Results", use_container_width=True):
-            st.session_state.analysis_results = None
-            st.session_state.papers_data = None
+            for key in ['analysis_results', 'papers_data']:
+                if key in st.session_state:
+                    del st.session_state[key]
             st.rerun()
         
         # Statistics
-        st.markdown("### 📊 System Status")
         if st.session_state.analysis_results:
-            st.metric("Papers Analyzed", st.session_state.analysis_results.get('papers_analyzed', 0))
-            st.metric("PVDF Papers", st.session_state.analysis_results.get('papers_with_pvdf', 0))
-            st.metric("Quantitative Data", st.session_state.analysis_results.get('papers_with_quantitative_data', 0))
+            st.markdown("### 📊 Analysis Summary")
+            results = st.session_state.analysis_results
+            st.metric("Papers Analyzed", results.get('papers_analyzed', 0))
+            st.metric("PVDF Papers", results.get('papers_with_pvdf', 0))
+            st.metric("Quantitative Data", results.get('papers_with_quantitative_data', 0))
+            st.metric("Total Extractions", results.get('total_extractions', 0))
         
         # Information
         with st.expander("ℹ️ About This Tool"):
@@ -901,7 +1141,8 @@ def main():
                     - 📄 **Total papers analyzed**: {analysis_results['papers_analyzed']}
                     - 🧪 **PVDF-related papers**: {analysis_results['papers_with_pvdf']}
                     - 📊 **Papers with quantitative data**: {analysis_results['papers_with_quantitative_data']}
-                    - 🔢 **Parameters extracted**: {len(analysis_results.get('parameter_dfs', {}))}
+                    - 🔢 **Total extractions**: {analysis_results['total_extractions']}
+                    - 📈 **Parameters extracted**: {len(analysis_results.get('parameter_dfs', {}))}
                     """)
                 
             except Exception as e:
@@ -911,11 +1152,12 @@ def main():
     # Display results
     if st.session_state.analysis_results:
         analysis_results = st.session_state.analysis_results
+        analyzer = st.session_state.ner_analyzer
         
         # Create tabs for different visualizations
         tabs = st.tabs([
             "📊 Parameter Distributions",
-            "🔥 Dopant Analysis",
+            "🔥 Dopant Analysis", 
             "📈 Radar Comparison",
             "🌳 Hierarchical View",
             "🔗 Correlations",
@@ -936,7 +1178,8 @@ def main():
                 selected_params = st.multiselect(
                     "Select parameters to visualize",
                     options=available_params,
-                    default=available_params[:min(3, len(available_params))]
+                    default=available_params[:min(3, len(available_params))],
+                    key="param_viz"
                 )
                 
                 # Create charts for each selected parameter
@@ -958,7 +1201,7 @@ def main():
                             for idx, row in sample_df.iterrows():
                                 with st.container():
                                     st.markdown(f"""
-                                    <div class="ner-card">
+                                    <div class="parameter-box">
                                     <div class="metric-highlight">{row['value']} {row['unit']}</div>
                                     <small>Dopant: {row.get('dopant', 'N/A')}</small><br>
                                     <small><i>{row['context'][:100]}...</i></small>
@@ -989,6 +1232,12 @@ def main():
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                 
+                # Box plot
+                st.markdown("#### Concentration Distribution by Category")
+                fig = analyzer.create_dopant_concentration_boxplot(dopant_df)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                
                 # Dopant frequency
                 st.markdown("#### Most Frequently Studied Dopants")
                 dopant_counts = dopant_df['dopant'].value_counts().head(10)
@@ -1002,7 +1251,7 @@ def main():
                     color=dopant_counts.values,
                     color_continuous_scale='Viridis'
                 )
-                fig.update_layout(height=400)
+                fig.update_layout(height=400, template="plotly_white")
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Raw data
@@ -1050,6 +1299,7 @@ def main():
             
             if 'dopant_df' in analysis_results and not analysis_results['dopant_df'].empty:
                 # Sunburst chart
+                st.markdown("#### Dopant Hierarchy Sunburst")
                 fig = analyzer.create_sunburst_dopant_hierarchy(analysis_results['dopant_df'])
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
@@ -1063,17 +1313,19 @@ def main():
                     }).round(2)
                     
                     # Flatten column names
-                    category_stats.columns = ['Avg Conc', 'Studies', 'Std Dev', 'Unique Dopants']
+                    category_stats.columns = ['Avg Conc (wt%)', 'Studies', 'Std Dev', 'Unique Dopants']
                     st.dataframe(category_stats, use_container_width=True)
             else:
                 st.info("No hierarchical data available. Enable dopant extraction in analysis settings.")
         
         # Tab 5: Correlations
-        with tabs[5]:
+        with tabs[4]:
             st.markdown("### 🔗 Parameter Correlations")
             
             param_dfs = analysis_results.get('parameter_dfs', {})
             
+            # Correlation matrix
+            st.markdown("#### Parameter Correlation Matrix")
             if len(param_dfs) >= 2:
                 fig = analyzer.create_parameter_correlation_matrix(param_dfs)
                 if fig:
@@ -1085,14 +1337,16 @@ def main():
                     - **Positive values** (blue): Parameters increase together
                     - **Negative values** (red): Parameters have inverse relationship
                     - **Near zero**: Little to no relationship
-                    
-                    **Expected patterns in PVDF composites:**
-                    - d33 often correlates with β-phase content
-                    - High dopant concentrations may reduce mechanical properties
-                    - Dielectric constant may correlate with conductivity
                     """)
             else:
                 st.info("Need at least 2 parameter types for correlation analysis.")
+            
+            # d33 vs Concentration scatter
+            st.markdown("#### d33 vs Dopant Concentration")
+            if 'dopant_df' in analysis_results:
+                fig = analyzer.create_d33_vs_concentration_scatter(param_dfs, analysis_results['dopant_df'])
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
         
         # Tab 6: Summary & Export
         with tabs[5]:
@@ -1125,7 +1379,8 @@ def main():
                             "📊 Download Parameter Data (CSV)",
                             csv,
                             "parameter_extractions.csv",
-                            "text/csv"
+                            "text/csv",
+                            use_container_width=True
                         )
             
             # Export dopant data
@@ -1136,7 +1391,8 @@ def main():
                         "🧪 Download Dopant Data (CSV)",
                         csv,
                         "dopant_extractions.csv",
-                        "text/csv"
+                        "text/csv",
+                        use_container_width=True
                     )
             
             # Export summary report
@@ -1147,7 +1403,8 @@ def main():
                     "📄 Download Analysis Report (TXT)",
                     report,
                     "ner_analysis_report.txt",
-                    "text/plain"
+                    "text/plain",
+                    use_container_width=True
                 )
             
             # Sample extractions
@@ -1239,57 +1496,88 @@ def create_sample_data() -> Dict[str, Any]:
     n_papers = 50
     papers = []
     
-    # Sample dopants and concentrations
-    dopants = ["ZnO", "TiO2", "BaTiO3", "CNT", "Graphene", "PZT", "MoS2", "Ag NPs", 
-               "Fe2O3", "Al2O3", "MWCNT", "GO", "RGO", "Cellulose", "Clay"]
+    # Sample dopants and their typical concentrations
+    dopant_info = {
+        "ZnO": {"category": "Metal Oxides", "conc_range": (1.0, 10.0)},
+        "TiO₂": {"category": "Metal Oxides", "conc_range": (0.5, 5.0)},
+        "BaTiO₃": {"category": "Metal Oxides", "conc_range": (5.0, 20.0)},
+        "CNT": {"category": "Carbon-Based", "conc_range": (0.1, 3.0)},
+        "Graphene": {"category": "Carbon-Based", "conc_range": (0.05, 2.0)},
+        "PZT": {"category": "Ceramics", "conc_range": (10.0, 30.0)},
+        "MoS₂": {"category": "2D Materials", "conc_range": (0.5, 5.0)},
+        "Ag NPs": {"category": "Nanoparticles", "conc_range": (0.5, 5.0)},
+        "Fe₂O₃": {"category": "Metal Oxides", "conc_range": (2.0, 15.0)},
+        "Al₂O₃": {"category": "Metal Oxides", "conc_range": (3.0, 12.0)}
+    }
     
     # Sample abstracts with quantitative data
     for i in range(n_papers):
-        # Randomly select dopants
-        n_dopants = np.random.randint(0, 3)
-        selected_dopants = np.random.choice(dopants, n_dopants, replace=False)
+        paper_id = f'paper_{i+1:04d}'
+        
+        # Randomly select 1-2 dopants
+        n_dopants = np.random.randint(1, 3)
+        selected_dopants = np.random.choice(list(dopant_info.keys()), n_dopants, replace=False)
         
         # Generate abstract with quantitative data
-        abstract = f"Study of PVDF composites "
+        abstract_parts = []
+        abstract_parts.append(f"Study of PVDF composites ")
         
-        if len(selected_dopants) > 0:
-            abstract += f"doped with {', '.join(selected_dopants)} "
-            for dopant in selected_dopants:
-                conc = np.random.uniform(0.1, 15)
-                abstract += f"({conc:.1f} wt% {dopant}) "
+        if selected_dopants:
+            dopant_str = ", ".join(selected_dopants)
+            abstract_parts.append(f"doped with {dopant_str}. ")
         
-        # Add random parameters
-        params = []
-        if np.random.random() > 0.3:
-            d33 = np.random.uniform(5, 80)
-            params.append(f"d33 of {d33:.1f} pC/N")
+        # Add concentrations
+        for dopant in selected_dopants:
+            conc_range = dopant_info[dopant]["conc_range"]
+            concentration = np.random.uniform(conc_range[0], conc_range[1])
+            abstract_parts.append(f"The {dopant} concentration was {concentration:.1f} wt%. ")
         
-        if np.random.random() > 0.4:
-            beta = np.random.uniform(30, 95)
-            params.append(f"beta-phase content of {beta:.1f}%")
+        # Add d33 values (correlated with dopant type)
+        d33_base = 30  # Base d33 for pure PVDF
         
-        if np.random.random() > 0.5:
-            dielectric = np.random.uniform(10, 150)
-            params.append(f"dielectric constant of {dielectric:.1f}")
+        for dopant in selected_dopants:
+            # Enhancement factor based on dopant type
+            if dopant in ["CNT", "Graphene"]:
+                enhancement = np.random.uniform(1.5, 3.0)
+            elif dopant in ["BaTiO₃", "PZT"]:
+                enhancement = np.random.uniform(2.0, 4.0)
+            else:
+                enhancement = np.random.uniform(1.2, 2.5)
+            
+            d33_value = d33_base * enhancement
+            abstract_parts.append(f"The d33 coefficient reached {d33_value:.1f} pC/N for {dopant} composite. ")
         
-        if params:
-            abstract += f"showing {', '.join(params)}. "
+        # Add beta-phase content (correlated with d33)
+        beta_phase = np.random.uniform(60, 95)
+        abstract_parts.append(f"The β-phase content was {beta_phase:.1f}%. ")
         
-        abstract += "The composite was prepared by solution casting method and characterized using various techniques."
+        # Add dielectric constant
+        dielectric = np.random.uniform(15, 120)
+        abstract_parts.append(f"The dielectric constant was {dielectric:.1f}. ")
+        
+        # Add voltage output
+        voltage = np.random.uniform(5, 45)
+        abstract_parts.append(f"The output voltage reached {voltage:.1f} V. ")
+        
+        # Final part
+        abstract_parts.append("The composite was prepared by solution casting method and characterized using XRD, FTIR, and piezoelectric measurements.")
+        
+        # Combine all parts
+        abstract = " ".join(abstract_parts)
         
         papers.append({
-            'paper_id': f'paper_{i+1:04d}',
-            'title': f'PVDF Composite Study {i+1}',
+            'paper_id': paper_id,
+            'title': f'PVDF Composite Study {i+1}: {", ".join(selected_dopants)} Doping',
             'abstract': abstract,
             'full_text': abstract * 3,  # Simulate full text
-            'year': np.random.randint(2015, 2024)
+            'year': np.random.randint(2018, 2024)
         })
     
     papers_df = pd.DataFrame(papers)
     
     return {
         'papers_df': papers_df,
-        'dopants': dopants
+        'dopant_info': dopant_info
     }
 
 def generate_analysis_report(analysis_results: Dict[str, Any], analyzer: QuantitativeNERAnalyzer) -> str:
@@ -1308,6 +1596,7 @@ def generate_analysis_report(analysis_results: Dict[str, Any], analyzer: Quantit
     report_lines.append(f"Total papers analyzed: {analysis_results.get('papers_analyzed', 0)}")
     report_lines.append(f"PVDF-related papers: {analysis_results.get('papers_with_pvdf', 0)}")
     report_lines.append(f"Papers with quantitative data: {analysis_results.get('papers_with_quantitative_data', 0)}")
+    report_lines.append(f"Total extractions: {analysis_results.get('total_extractions', 0)}")
     report_lines.append("")
     
     # Parameter statistics
@@ -1320,6 +1609,7 @@ def generate_analysis_report(analysis_results: Dict[str, Any], analyzer: Quantit
                 report_lines.append(f"\n{analyzer.property_names.get(param, param)}:")
                 report_lines.append(f"  Count: {len(df)}")
                 report_lines.append(f"  Mean: {df['value'].mean():.2f} {analyzer.units.get(param, '')}")
+                report_lines.append(f"  Median: {df['value'].median():.2f}")
                 report_lines.append(f"  Std Dev: {df['value'].std():.2f}")
                 report_lines.append(f"  Range: {df['value'].min():.2f} - {df['value'].max():.2f}")
     
