@@ -1811,4 +1811,4 @@ def main():
             5. **Enhancement Quantification**: Performance improvements are calculated and normalized
             6. **Advanced Visualization**: Interactive charts reveal optimal dopant strategies
            
-            ### Query-Based File Organization
+            ### Query-Based File Organization """)
