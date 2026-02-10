@@ -1143,7 +1143,7 @@ if st.session_state.get('relevant_papers'):
                         data = st.session_state.downloaded_pdfs[pid]['pdf_bytes']
                     else:
                         data = db_manager.get_pdf(pid)
-                    if 
+                    if data:
                         title = re.sub(r'[^\w\s-]', '', paper['title'])[:50]
                         fname = f"{pid}_{title}.pdf".replace(' ', '_')
                         st.download_button(
