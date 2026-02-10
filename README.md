@@ -28,7 +28,7 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction13-streamlit-red)](https://piezoelectricity-knowledge-explorer13.streamlit.app/) (Type B, Robust, Advanced r6, Smart Query can be Given to the ML model, Enhanced Features for Database Processing)
 
-[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction14-streamlit-red)](https://piezoelectricity-knowledge-explorer14.streamlit.app/) (For Small Data, Type B, Robust, Advanced r13, Smart Query can be Given to the ML model, Enhanced Features for Database Processing, this code has been implemented in the paperwork)
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction14-streamlit-red)](https://piezoelectricity-knowledge-explorer14.streamlit.app/) (For Small Data, Type B, Robust, Advanced r13, Smart Query can be Given to the ML model, Enhanced Features for Database Processing, this code has been implemented for the paperwork)
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction15-streamlit-red)](https://piezoelectricity-knowledge-explorer15.streamlit.app/) (For Big Data, Type B, Robust, Advanced r14, Smart Query can be Given to the ML model, Enhanced Features for Database Processing)
 
@@ -58,7 +58,7 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc1-streamlit-red)](https://piezoelectric-databasevisualization1.streamlit.app/)  
 
-[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc2-streamlit-red)](https://piezoelectric-databasevisualization2.streamlit.app/)  
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc2-streamlit-red)](https://piezoelectric-databasevisualization2.streamlit.app/) (this code has been implemented for the paperwork) 
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc3-streamlit-red)](https://piezoelectric-databasevisualization3.streamlit.app/)  
 
