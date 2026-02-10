@@ -594,7 +594,7 @@ class DatabaseManager:
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                 for paper_id in paper_ids:
                     pdf_data = self.get_pdf(paper_id)
-                    if pdf_  # ✅ FIXED: was "if pdf_" (syntax error)
+                    if pdf_data:  # ✅ FIXED: was "if pdf_" (syntax error)
                         info = self.get_paper_info(paper_id)
                         if info:
                             title = re.sub(r'[^\w\s-]', '', info['title'])[:100]
