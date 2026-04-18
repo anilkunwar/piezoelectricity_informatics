@@ -71,7 +71,7 @@ Text based data extraction from web using attention mechanism
 
  [![pvdfpiezoelectricsgithub](https://img.shields.io/badge/pvdfpiezoelectrics-github-red)](https://github.com/Sachinscnpdl/PVDF_Piezoelectric) (Link to github repository on PVDF-Piezoelectrics)
  
- [![machinelearningpiezoelectricpolymer](https://img.shields.io/badge/pgmlxpiezov1-webApp-brightblue.svg)](https://pgmlpiezo.streamlit.app/) ( Web App for Inverse Design of S-doped PVDF)
+ [![machinelearningpiezoelectricpolymer](https://img.shields.io/badge/pgmlxpiezov1-webApp-blue)](https://pgmlpiezo.streamlit.app/) ( Web App for Inverse Design of S-doped PVDF)
 
  # How to Cite This Work:
 
