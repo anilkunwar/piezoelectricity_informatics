@@ -1,5 +1,7 @@
 # Informatics based study of Dopants on efficiency of PVDF fabricated through various routes
 
+![Image of PiezoInformatics](images/piezo-informatics.jpg)
+
 Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/nlpdataextraction-streamlit-red)](https://piezoelectricity-knowledge-explorer.streamlit.app/) (Type A: Normal Speed)
