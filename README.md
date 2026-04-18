@@ -64,6 +64,10 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc3-streamlit-red)](https://piezoelectric-databasevisualization3.streamlit.app/)  
 
-[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc4-streamlit-red)](https://piezoelectric-databasevisualization4.streamlit.app/)  
+[![machinelearningpiezoelectricmaterialtensormechanics](https://img.shields.io/badge/piezorc4-streamlit-red)](https://piezoelectric-databasevisualization4.streamlit.app/) 
+
+# How to Cite This Work:
+
+Poudel, S., Smok, W., Thapa, R., Timofiejczuk, A., Moelans, N., & Kunwar, A. (2026). Physics-guided machine learning for enhanced piezoelectric performance in electrospun PVDF/SnO2 nanofibers. Sustainable Materials and Technologies, e02008. https://doi.org/10.1016/j.susmat.2026.e02008
 
 
