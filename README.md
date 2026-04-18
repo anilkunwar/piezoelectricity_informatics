@@ -70,4 +70,6 @@ Text based data extraction from web using attention mechanism
 
 Poudel, S., Smok, W., Thapa, R., Timofiejczuk, A., Moelans, N., & Kunwar, A. (2026). Physics-guided machine learning for enhanced piezoelectric performance in electrospun PVDF/SnO2 nanofibers. Sustainable Materials and Technologies, e02008. https://doi.org/10.1016/j.susmat.2026.e02008
 
+ [![pvdfpiezoelectricsgithub](https://img.shields.io/badge/pvdfpiezoelectrics-github-red)](https://github.com/Sachinscnpdl/PVDF_Piezoelectric) (Link to github repository on PVDF-Piezoelectrics)
+
 
